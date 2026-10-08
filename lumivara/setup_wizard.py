@@ -37,7 +37,9 @@ def ask(prompt: str, secret: bool = False, default: str = "") -> str:
     try:
         val = getpass.getpass(f"{prompt}{suffix}: ") if secret else input(f"{prompt}{suffix}: ")
     except EOFError:
-        val = ""
+        # no terminal to answer from (e.g. piped without a tty) — stop instead of looping
+        say("\nTidak ada input (jalankan setup dari terminal). Dibatalkan.")
+        sys.exit(1)
     return val.strip() or default
 
 

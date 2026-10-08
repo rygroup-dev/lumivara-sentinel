@@ -176,7 +176,7 @@ def setup_cookie(env: dict[str, str]) -> dict[str, str]:
     say("  2. Tekan F12 -> tab 'Application' (kalau nggak kelihatan, klik '>>')")
     say("  3. Kiri: Storage -> Cookies -> https://lumivaraonline.com")
     say(f"  4. Klik baris '{COOKIE_NAME}' -> copy isi kolom Value (panjang, mulai 'eyJ')")
-    say("  (Console/document.cookie TIDAK bisa — cookie ini HttpOnly.)")
+    say("  (Console/document.cookie TIDAK bisa - cookie ini HttpOnly.)")
     current = env.get("LUMIVARA_COOKIE", "")
     while True:
         raw = ask("Paste cookie" + (" (Enter = pakai yang lama)" if current else ""), secret=True)
@@ -195,7 +195,7 @@ def setup_cookie(env: dict[str, str]) -> dict[str, str]:
                                  {"Cookie": cookie, "Referer": GAME + "/"}).get("characters", [])
             except (urllib.error.URLError, ValueError):
                 pass
-            say(f"  OK -> login sebagai {me.get('name')}  (berlaku sampai ±{cookie_expiry(cookie)})")
+            say(f"  OK -> login sebagai {me.get('name')}  (berlaku sampai ~{cookie_expiry(cookie)})")
             for c in chars:
                 say(f"     karakter: {c.get('name')} Lv{c.get('level')} {c.get('classId')} @ {c.get('area')}")
             if not chars:
@@ -216,7 +216,7 @@ def main() -> None:
     if "--check" in sys.argv:  # used by the launchers: exit 0 when .env is complete
         sys.exit(0 if is_configured() else 1)
     cookie_only = "--cookie" in sys.argv
-    say("Lumivara Sentinel — setup")
+    say("Lumivara Sentinel - setup")
     say("Semua isian disimpan di file .env di komputer ini saja (tidak dikirim ke mana pun).")
     env = read_env()
     values: dict[str, str] = {}

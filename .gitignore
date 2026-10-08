@@ -1,0 +1,29 @@
+# secrets & local config
+.env
+*.session
+cookie.txt
+
+# captured protocol (may contain account data)
+*.har
+captures/
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+
+# logs
+logs/
+*.log
+data/
+
+# portable Python bundle (installers fetch Python instead)
+.runtime/
+
+# local runtime state / scratch
+*.tmp
+*.out
+*.lock

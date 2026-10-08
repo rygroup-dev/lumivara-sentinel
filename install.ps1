@@ -6,6 +6,7 @@
 # makes sure Python 3.11+ exists, installs dependencies, asks for your Telegram
 # bot + game login, and puts a "Lumivara Sentinel" shortcut on the Desktop.
 # Re-running it updates the code and keeps your .env / data.
+# Optional: $env:LUMIVARA_NO_SHORTCUT=1 / $env:LUMIVARA_NO_START=1 skip the shortcut / auto-start.
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -91,16 +92,17 @@
     }
 
     # --- Desktop shortcut ---------------------------------------------------
-    try {
+    if (-not $env:LUMIVARA_NO_SHORTCUT) { try {
         $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Lumivara Sentinel.lnk'
         $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
         $sh.TargetPath = Join-Path $Dir 'run.bat'
         $sh.WorkingDirectory = $Dir
         $sh.Save()
         Say "Shortcut created on your Desktop: Lumivara Sentinel"
-    } catch { Warn 'Could not create a Desktop shortcut (start run.bat from the folder instead).' }
+    } catch { Warn 'Could not create a Desktop shortcut (start run.bat from the folder instead).' } }
 
     Say 'Done.'
+    if ($env:LUMIVARA_NO_START) { Say "Start it later with $Dir\run.bat"; return }
     $ans = Read-Host 'Start the bot now? [Y/n]'
     if ($ans -notmatch '^[nN]') {
         Start-Process -FilePath (Join-Path $Dir 'run.bat') -WorkingDirectory $Dir

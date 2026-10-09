@@ -165,6 +165,10 @@ def market_cancel_order(order_id: str) -> dict:
     return {"type": "marketCancelOrder", "orderId": order_id}
 
 
+def market_cancel_listing(listing_id: str) -> dict:
+    return {"type": "marketCancelListing", "listingId": listing_id}
+
+
 def market_close() -> dict:
     return {"type": "marketClose"}
 

@@ -72,6 +72,8 @@ class Config:
 
     # Player market (needs ENABLE_MARKET): sell loot/refine stones/cards to players
     market_sell_cards: bool = True
+    market_sell_gear: bool = True     # list gear we won't wear (other class / worse)
+    market_gear_slots: int = 20       # gear listings allowed at once (40 with premium)
     market_reprice_hours: float = 6.0
     market_every_min: int = 45    # town trip to the broker at most this often
 
@@ -109,6 +111,8 @@ class Config:
             potion_keep=_i("POTION_KEEP", 150),
             farm_goal=(os.getenv("FARM_GOAL", "silver").strip().lower() or "silver"),
             market_sell_cards=_b("MARKET_SELL_CARDS", True),
+            market_sell_gear=_b("MARKET_SELL_GEAR", True),
+            market_gear_slots=_i("MARKET_GEAR_SLOTS", 20),
             market_reprice_hours=_f("MARKET_REPRICE_HOURS", 6.0),
             market_every_min=_i("MARKET_EVERY_MIN", 45),
             gold_autobuy=_b("GOLD_AUTOBUY", False),

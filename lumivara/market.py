@@ -38,7 +38,10 @@ class Trader:
         self.prices: dict[str, dict] = {}     # item -> last analysed board
         self.last_pass = 0.0
         self.counts = {"instant_silver": 0, "listed": 0, "listed_value": 0, "bought_potions": 0,
-                       "filled_value": 0}
+                       "filled_value": 0, "gear_listed": 0, "gear_listed_value": 0}
+        self.gear_prices: dict[str, dict] = {}
+        self._listed_now: set[str] = set()    # gear ids we listed this session
+        self.spare_gear = lambda: []          # replaced by Automator.spare_gear
         self._ask = 100
         self.notify = lambda *a, **k: None    # replaced by Automator.notify
         self._known_orders: dict[str, dict] = {}   # my open orders seen on the last pass
@@ -151,6 +154,16 @@ class Trader:
                 await self.client.send(P.market_cancel_order(o["id"]))
                 n += 1
                 await asyncio.sleep(0.8)
+        # gear listings get twice as long (fewer buyers per model)
+        gear_cutoff = time.time() - 2 * self.cfg.market_reprice_hours * 3600
+        for x in self.my_listings():
+            created = x.get("createdAt") or 0
+            created = created / 1000 if created > 1e11 else created
+            if x.get("id") and created and created < gear_cutoff:
+                await self.client.send(P.market_cancel_listing(x["id"]))
+                self._listed_now.discard((x.get("gear") or {}).get("id"))
+                n += 1
+                await asyncio.sleep(0.8)
         if n:
             log.info("market: cancelled %d stale listing(s) for re-pricing", n)
         return n
@@ -204,14 +217,20 @@ class Trader:
             else:
                 summary[kind].append(item)
             await asyncio.sleep(1.2)
+        try:
+            spare = sorted(self.spare_gear(), key=lambda g: -int(g.get("tier") or 0))
+            summary["gear"] = await self.sell_gear(spare)
+        except Exception:  # noqa: BLE001
+            log.exception("gear listing failed")
+            summary["gear"] = []
         await self.client.send(P.market_close())
         await asyncio.sleep(1.0)
         gained = int(self.state.self_.get("silver") or 0) - silver0
         if gained > 0:
             self.counts["instant_silver"] += gained
-        log.info("market pass: sold now %s | listed %s | left for NPC %s | kept %s | silver %+d",
-                 summary["instant"] or "-", summary["listed"] or "-", summary["npc"] or "-",
-                 summary["keep"] or "-", gained)
+        log.info("market pass: sold now %s | listed %s | gear listed %s | left for NPC %s | kept %s | "
+                 "silver %+d", summary["instant"] or "-", summary["listed"] or "-",
+                 summary.get("gear") or "-", summary["npc"] or "-", summary["keep"] or "-", gained)
         mine = self.my_orders()
         log.info("market: my open orders: %s", ", ".join(
             f"{o.get('side')} {o.get('item')} {o.get('quantity')}/{o.get('initialQuantity')}@{o.get('price')}"
@@ -250,6 +269,9 @@ class Trader:
                            for x in summary["listed"])
         if listed_value >= 500:
             lines.append(f"listed ~{listed_value:,} silver: {', '.join(summary['listed'])}")
+        if summary.get("gear"):
+            lines.append(f"gear listed ({len(summary['gear'])}): {', '.join(summary['gear'][:8])}"
+                         + (" …" if len(summary["gear"]) > 8 else ""))
         if lines:
             self.notify("⚖️ <b>Market</b>\n" + "\n".join(lines) +
                         f"\nsilver now {int(self.state.self_.get('silver') or 0):,}",
@@ -278,9 +300,83 @@ class Trader:
             log.info("market: bought %s x%d at %d (NPC sells at %d)", item, got, b["ask"], npc)
         return max(got, 0)
 
+    # ---------------------------------------------------------------- gear
+    @staticmethod
+    def gear_model(g: dict) -> str:
+        """Client's price-group key for a piece of gear."""
+        return f"gear:{g.get('template') or g.get('slot')}:{int(g.get('tier') or 0)}"
+
+    async def gear_price(self, model: str) -> dict | None:
+        """{low, avg, count} of player listings for one gear model."""
+        cached = self.gear_prices.get(model)
+        if cached and time.time() - cached["at"] < 600:
+            return cached
+        before = self.state.market_at
+        self._ask += 1
+        await self.client.send(P.market_depth(P.POTION_BUY_ENTRY, ask=self._ask, model=model))
+        for _ in range(12):
+            await asyncio.sleep(0.4)
+            mdl = (self.state.market.get("board") or {}).get("model") or {}
+            if self.state.market_at > before and mdl.get("key") == model:
+                info = {"low": int(mdl.get("low") or 0), "avg": float(mdl.get("avg") or 0),
+                        "count": int(mdl.get("count") or 0), "at": time.time()}
+                self.gear_prices[model] = info
+                return info
+        return None
+
+    def my_listings(self) -> list[dict]:
+        me = self.state.self_.get("id")
+        return [x for x in self.state.market_listings.values() if me and x.get("playerId") == me]
+
+    def listed_gear_ids(self) -> set[str]:
+        """Gear we have on the market. Listed gear stays in our bag (the client
+        hides it from the sell list the same way)."""
+        ids = {(x.get("gear") or {}).get("id") for x in self.my_listings()}
+        return {i for i in ids if i} | self._listed_now
+
+    async def sell_gear(self, spare: list[dict]) -> list[str]:
+        """List spare gear (another class's, or worse than what we wear) up to
+        the listing cap, priced just under the cheapest listing of its model
+        but never below half the board average."""
+        if not self.cfg.market_sell_gear or not spare:
+            return []
+        on_market = self.listed_gear_ids()
+        free = self.cfg.market_gear_slots - len(on_market)
+        listed: list[str] = []
+        refused = 0
+        for g in spare:
+            if free <= 0 or refused >= 2:      # cap reached (or the server keeps saying no)
+                break
+            gid = g["id"]
+            if gid in on_market:
+                continue
+            model = self.gear_model(g)
+            p = await self.gear_price(model)
+            if not p or not p["count"] or not p["low"]:
+                continue        # nobody sells this model: no price to go by
+            price = max(p["low"] - 1, int(p["avg"] * 0.5), 1)
+            silver0 = int(self.state.self_.get("silver") or 0)
+            await self.client.send(P.market_list_gear(gid, price))
+            await asyncio.sleep(1.2)
+            # accepted = it shows up in our listings, or the listing fee was taken
+            fee_taken = int(self.state.self_.get("silver") or 0) < silver0
+            if gid in self.listed_gear_ids() or fee_taken:
+                self._listed_now.add(gid)
+                free -= 1
+                refused = 0
+                self.counts["gear_listed"] += 1
+                self.counts["gear_listed_value"] += int(P.market_net(price))
+                listed.append(f"{g.get('name')}@{price}")
+            else:
+                refused += 1
+                log.info("market: gear %s (%s) wasn't accepted at %d", g.get("name"), model, price)
+        return listed
+
     def stock_value(self, keep_potions: int) -> float:
         """Rough market value of what we'd sell (last known prices, else 5x NPC)."""
         total = 0.0
+        if self.cfg.market_sell_gear and len(self.my_listings()) < self.cfg.market_gear_slots:
+            total += 100 * len(self.spare_gear())     # spare gear lists for ~120-500 each
         for item, qty in self.candidates(keep_potions):
             p = self.prices.get(item)
             unit = ((p["bid"] or p["avg"]) if p

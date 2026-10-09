@@ -79,6 +79,7 @@ class Automator:
         self.intel.goal = cfg.farm_goal
         self.trader = Trader(cfg, state, client)
         self.trader.notify = self.notify
+        self.trader.spare_gear = self.spare_gear
         self._zone_pick: tuple[str, str, float] | None = None   # (zone, reason, chosen at)
         self._target: int | None = None
         self._target_since = 0.0
@@ -333,8 +334,9 @@ class Automator:
         cls = self.state.self_.get("classId")
         allowed = P.CLASS_WEAPONS.get(cls)
         best: dict[str, tuple[float, str]] = {}
+        on_market = self.trader.listed_gear_ids()
         for gid, g in self.state.gear.items():
-            if gid in self._equip_refused or not self.gear_level_ok(g):
+            if gid in self._equip_refused or gid in on_market or not self.gear_level_ok(g):
                 continue
             if g.get("slot") == P.WEAPON_SLOT and allowed and g.get("template") not in allowed:
                 continue
@@ -346,16 +348,37 @@ class Automator:
                 best[slot] = (score, gid)
         return {slot: gid for slot, (_s, gid) in best.items()}
 
+    def _preset_gear_ids(self) -> set[str]:
+        """Gear on us or saved in any outfit preset (`wearing`, other classes'
+        `classEquipped`): the market refuses to list those."""
+        s = self.state.self_
+        ids: set[str] = set()
+
+        def collect(v) -> None:
+            if isinstance(v, str):
+                ids.add(v)
+            elif isinstance(v, dict):
+                for x in v.values():
+                    collect(x)
+            elif isinstance(v, list):
+                for x in v:
+                    collect(x)
+        for key in ("equipped", "wearing", "classEquipped"):
+            collect(s.get(key))
+        return ids
+
     def spare_gear(self) -> list[dict]:
         """Gear we will never wear: not on us, not locked, and either for
         another class or worse than what we already have in that slot."""
-        worn_ids = set((self.state.self_.get("equipped") or {}).values())
+        worn_ids = self._preset_gear_ids()
         best = self.best_gear()
         cls = self.state.self_.get("classId")
         allowed = P.CLASS_WEAPONS.get(cls)
         out = []
+        on_market = self.trader.listed_gear_ids()
         for gid, g in self.state.gear.items():
-            if gid in worn_ids or gid in best.values() or g.get("locked") or g.get("cards"):
+            if (gid in worn_ids or gid in best.values() or gid in on_market
+                    or g.get("locked") or g.get("cards")):
                 continue
             slot = self.worn_slot(g)
             other_class = (g.get("slot") == P.WEAPON_SLOT and allowed
@@ -945,10 +968,12 @@ class Automator:
                                            for k, v in s.items() if k not in ("inventory", "stats")})
                 inv = {k: v for k, v in self._inv().items() if v}
                 log.info("INVENTORY %d kinds: %s", len(inv), json.dumps(inv, sort_keys=True))
-                log.info("GEAR %d pieces: %s", len(self.state.gear), json.dumps(
-                    [{k: g.get(k) for k in ("id", "name", "slot", "template", "tier", "refine",
-                                            "bonuses", "cards", "locked", "level")}
-                     for g in self.state.gear.values()], default=str))
+                by: dict[str, int] = {}
+                for g in self.state.gear.values():
+                    k = f"{g.get('slot')}/T{g.get('tier') or 0}"
+                    by[k] = by.get(k, 0) + 1
+                log.info("GEAR %d pieces (%d spare): %s", len(self.state.gear),
+                         len(self.spare_gear()), json.dumps(dict(sorted(by.items()))))
             if s and time.time() - last_report > 600:
                 last_report = time.time()
                 self.intel.save()

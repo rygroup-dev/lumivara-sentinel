@@ -128,7 +128,7 @@ STATUS online | Lv49 archer @field (target field) | hp 930/930 | hp-pots 264 | s
 | 📊 **Stat** | Bobot per class (Archer DEX 3 : AGI 2 : VIT 1). Stat yang terlalu mahal ditunda sampai point cukup. |
 | ♻️ **Respec** | Di bawah Lv80 (gratis), kalau stat/skill terlanjur salah alokasi, bot ke Reset Master sekali lalu alokasi ulang. |
 | 📜 **Quest & hadiah** | 10 quest tutorial, daily, mail, hadiah 100 kill harian diklaim otomatis. Quest *change job* & *jual-beli* perlu kamu lakukan sekali di game. |
-| ⚖️ **Market pemain** (`ENABLE_MARKET`) | Di broker town: tiap loot, refine stone, card & potion lebih dicek ke board. Jual langsung ke bid kalau ≥85% harga rata-rata, kalau tidak pasang jual 1 silver di bawah ask termurah (tidak di bawah 85% rata-rata). Kalau NPC lebih untung setelah fee (2,5% pasang + 8% pajak), ditinggal untuk NPC. Potion dibeli dari market kalau lebih murah dari NPC. Order yang tidak laku > `MARKET_REPRICE_HOURS` dibatalkan & dipasang ulang dengan harga baru. |
+| ⚖️ **Market pemain** (`ENABLE_MARKET`) | Di broker town: tiap loot, refine stone, card, potion lebih, blue potion, relic box, fly/butterfly wing dicek ke board (item hadiah/`gifted` tidak bisa dijual, otomatis dilewati). Gear class lain / lebih jelek dipasang 1 silver di bawah listing termurah model yang sama. Jual langsung ke bid kalau ≥85% harga rata-rata, kalau tidak pasang jual 1 silver di bawah ask termurah (tidak di bawah 85% rata-rata). Kalau NPC lebih untung setelah fee (2,5% pasang + 8% pajak), ditinggal untuk NPC. Potion dibeli dari market kalau lebih murah dari NPC. Order yang tidak laku > `MARKET_REPRICE_HOURS` dibatalkan & dipasang ulang dengan harga baru. |
 | 💰 **Gold Exchange** | Baca harga (bid/ask). Dengan `GOLD_AUTOBUY=true`, tiap 10 menit silver di atas `GOLD_RESERVE` ditukar ke Gold di ask termurah (maks `GOLD_MAX_PRICE`). |
 | 🧭 **Rute aman** | Rute portal tidak lewat map yang jauh di atas level (lewat town). Kalau nabrak tembok saat jalan ke portal, bot coba jalan memutar. |
 
@@ -170,6 +170,8 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `FARM_GOAL` | silver | Map dinilai dari `silver`/jam bersih, atau `exp`/jam |
 | `ENABLE_MARKET` | false | Jual-beli otomatis di market pemain |
 | `MARKET_SELL_CARDS` | true | Ikut jual card di market |
+| `MARKET_SELL_GEAR` | true | Jual gear yang tidak akan dipakai (class lain / lebih jelek) |
+| `MARKET_GEAR_SLOTS` | 20 | Maks gear dipasang sekaligus (40 kalau premium) |
 | `MARKET_REPRICE_HOURS` | 6 | Pasang ulang order yang belum laku setelah sekian jam |
 | `MARKET_EVERY_MIN` | 45 | Paling sering ke broker tiap sekian menit |
 | `GOLD_AUTOBUY` | false | Tukar silver → Gold otomatis |

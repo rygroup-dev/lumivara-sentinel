@@ -92,11 +92,15 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
                 f"⚖️ Market: sold now +{tc['instant_silver']:,} · listed {tc['listed']} pcs "
                 f"(~{tc['listed_value']:,} silver) · {open_sells} open · "
                 f"cheap potions {tc['bought_potions']}\n"
+                f"🛡 Gear on market: {len(au.trader.listed_gear_ids())}/{orch.cfg.market_gear_slots} · "
+                f"listed this session {tc['gear_listed']} (~{tc['gear_listed_value']:,} silver) · "
+                f"spare left {len(au.spare_gear())}\n"
             )
         if orch.cfg.gold_autobuy or au.counts.get("gold_bought"):
             price = au.last_gold_price
             farm_line += (
-                f"🥇 Gold auto-buy {'🟢 ON' if orch.cfg.gold_autobuy else '⚪ OFF'} · "
+                f"🥇 Gold <b>{int(st.self_.get('gold') or 0):,}</b> · auto-buy "
+                f"{'🟢 ON' if orch.cfg.gold_autobuy else '⚪ OFF'} · "
                 f"bought {au.counts.get('gold_bought', 0)} gold for "
                 f"{au.counts.get('gold_silver_spent', 0):,} silver · "
                 f"price {f'{price:,}' if price else '?'} · keeps {orch.cfg.gold_reserve:,}\n"

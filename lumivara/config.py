@@ -66,6 +66,19 @@ class Config:
     potion_target: int = 150      # keep this many Red Potions
     potion_budget_pct: int = 30   # spend at most this % of current silver per restock
     arrow_min: int = 1000         # buy arrows when below this
+    potion_keep: int = 150        # sell looted Red Potions above this (2 silver each)
+
+    farm_goal: str = "silver"     # "silver" = net silver/h first, "exp" = EXP/h first
+
+    # Player market (needs ENABLE_MARKET): sell loot/refine stones/cards to players
+    market_sell_cards: bool = True
+    market_reprice_hours: float = 6.0
+    market_every_min: int = 45    # town trip to the broker at most this often
+
+    # Gold Exchange: convert spare silver to gold automatically
+    gold_autobuy: bool = False
+    gold_reserve: int = 2000      # never spend below this much silver
+    gold_max_price: int = 8000    # don't pay more than this many silver per gold
 
     @classmethod
     def load(cls) -> "Config":
@@ -93,6 +106,14 @@ class Config:
             potion_target=_i("POTION_TARGET", 150),
             potion_budget_pct=_i("POTION_BUDGET_PCT", 30),
             arrow_min=_i("ARROW_MIN", 1000),
+            potion_keep=_i("POTION_KEEP", 150),
+            farm_goal=(os.getenv("FARM_GOAL", "silver").strip().lower() or "silver"),
+            market_sell_cards=_b("MARKET_SELL_CARDS", True),
+            market_reprice_hours=_f("MARKET_REPRICE_HOURS", 6.0),
+            market_every_min=_i("MARKET_EVERY_MIN", 45),
+            gold_autobuy=_b("GOLD_AUTOBUY", False),
+            gold_reserve=_i("GOLD_RESERVE", 2000),
+            gold_max_price=_i("GOLD_MAX_PRICE", 8000),
         )
 
     def validate(self) -> list[str]:

@@ -42,6 +42,7 @@ async def _post_init(app: Application) -> None:
         loop.create_task(orch.automator.status_loop(), name="status"),
         loop.create_task(orch.automator.equip_loop(), name="equip"),
         loop.create_task(orch.automator.skill_loop(), name="skills"),
+        loop.create_task(orch.automator.gold_loop(), name="gold"),
         loop.create_task(tg.refresh_loop(), name="dash-refresh"),
     ]
 

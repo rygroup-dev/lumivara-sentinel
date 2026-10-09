@@ -39,6 +39,11 @@ class GameState:
         self._hp_peak = 0
         self.gold_market: dict = {}     # {depth:{bids,asks}, orders, history} after goldWatch
         self.gold_market_at = 0.0
+        self.raw_tap: list | None = None  # when a list, non-snapshot messages are copied into it
+        self.market: dict = {}          # player-market view (board etc.) after marketGetDepth
+        self.market_at = 0.0
+        self.market_orders: dict = {}   # my item orders, by id
+        self.market_listings: dict = {} # my gear listings, by id
         self.mail_pending = 0
         # Equipment items in the bag/worn, from the top-level `gearRows` stream:
         # {id: {slot, template, name, tier, bonuses, locked, ...}}
@@ -54,6 +59,8 @@ class GameState:
     def apply(self, msg: dict) -> None:
         self.last_recv = time.time()
         t = msg.get("type")
+        if self.raw_tap is not None and (t != "snapshot" or "market" in msg or "marketRows" in msg):
+            self.raw_tap.append(msg)
 
         if t == "pong":
             self.last_pong = time.time()
@@ -109,6 +116,24 @@ class GameState:
             for p in players:
                 if isinstance(p, dict) and my_id and p.get("id") == my_id:
                     _deep_merge(self._me, p)
+
+        # Player market (same merge as the client): `market` is the current
+        # view (board for the queried item, my orders...), `marketRows` streams
+        # my order/listing rows as add/del deltas.
+        rows = msg.get("marketRows")
+        if isinstance(rows, dict):
+            if rows.get("reset"):
+                self.market_orders, self.market_listings = {}, {}
+            for part, store in (("orders", self.market_orders), ("listings", self.market_listings)):
+                sect = rows.get(part) or {}
+                for rid in sect.get("del") or []:
+                    store.pop(rid, None)
+                for r in sect.get("add") or []:
+                    if isinstance(r, dict) and "id" in r:
+                        store[r["id"]] = r
+        if isinstance(msg.get("market"), dict):
+            self.market = msg["market"]
+            self.market_at = time.time()
 
         gm = msg.get("goldMarket")
         if isinstance(gm, dict):

@@ -128,7 +128,9 @@ STATUS online | Lv49 archer @field (target field) | hp 930/930 | hp-pots 264 | s
 | 📊 **Stat** | Bobot per class (Archer DEX 3 : AGI 2 : VIT 1). Stat yang terlalu mahal ditunda sampai point cukup. |
 | ♻️ **Respec** | Di bawah Lv80 (gratis), kalau stat/skill terlanjur salah alokasi, bot ke Reset Master sekali lalu alokasi ulang. |
 | 📜 **Quest & hadiah** | 10 quest tutorial, daily, mail, hadiah 100 kill harian diklaim otomatis. Quest *change job* & *jual-beli* perlu kamu lakukan sekali di game. |
-| 💰 **Gold Exchange** | Hanya membaca harga (bid/ask) + hitung silver ke premium. Order Gold kamu pasang manual di game. |
+| ⚖️ **Market pemain** (`ENABLE_MARKET`) | Di broker town: tiap loot, refine stone, card & potion lebih dicek ke board. Jual langsung ke bid kalau ≥85% harga rata-rata, kalau tidak pasang jual 1 silver di bawah ask termurah (tidak di bawah 85% rata-rata). Kalau NPC lebih untung setelah fee (2,5% pasang + 8% pajak), ditinggal untuk NPC. Potion dibeli dari market kalau lebih murah dari NPC. Order yang tidak laku > `MARKET_REPRICE_HOURS` dibatalkan & dipasang ulang dengan harga baru. |
+| 💰 **Gold Exchange** | Baca harga (bid/ask). Dengan `GOLD_AUTOBUY=true`, tiap 10 menit silver di atas `GOLD_RESERVE` ditukar ke Gold di ask termurah (maks `GOLD_MAX_PRICE`). |
+| 🧭 **Rute aman** | Rute portal tidak lewat map yang jauh di atas level (lewat town). Kalau nabrak tembok saat jalan ke portal, bot coba jalan memutar. |
 
 ## Dashboard Telegram (`/menu`)
 
@@ -141,6 +143,7 @@ quest) + tombol:
 - **🎒 Gear** — gear terpakai vs terbaik, *Equip best now*
 - **🏪 Town run** — pulang & belanja sekarang
 - **💰 Gold Market** — harga & hitungan premium
+- **⚖️ Market now** — ke broker & jual sekarang (pakai Return Scroll kalau di field)
 - **❤️ Heal now**, **🎁 Claim all**, **⚙️ Settings**, **🧾 WS Log**
 
 Dashboard update sendiri tiap ±5 detik di menu utama.
@@ -163,6 +166,15 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `POTION_TARGET` | 40 | Target stok Red Potion |
 | `POTION_BUDGET_PCT` | 30 | Maks % silver untuk potion per kunjungan |
 | `ARROW_MIN` | 1000 | Beli 2000 panah kalau di bawah ini |
+| `POTION_KEEP` | 150 | Red Potion hasil drop di atas ini dijual |
+| `FARM_GOAL` | silver | Map dinilai dari `silver`/jam bersih, atau `exp`/jam |
+| `ENABLE_MARKET` | false | Jual-beli otomatis di market pemain |
+| `MARKET_SELL_CARDS` | true | Ikut jual card di market |
+| `MARKET_REPRICE_HOURS` | 6 | Pasang ulang order yang belum laku setelah sekian jam |
+| `MARKET_EVERY_MIN` | 45 | Paling sering ke broker tiap sekian menit |
+| `GOLD_AUTOBUY` | false | Tukar silver → Gold otomatis |
+| `GOLD_RESERVE` | 2000 | Silver yang selalu disisakan |
+| `GOLD_MAX_PRICE` | 8000 | Harga maksimum per Gold (silver) |
 | `STAT_BUILD` | dex,agi,vit,… | Urutan stat untuk class tanpa bobot bawaan |
 | `ACTION_DELAY_MIN` / `_JITTER` | 0.45 / 0.55 | Jeda antar aksi (detik) |
 

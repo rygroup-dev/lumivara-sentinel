@@ -39,6 +39,7 @@ class FarmIntel:
         self.zones: dict[str, dict] = {}
         self.mobs: dict[str, dict] = {}
         self.dps = 0.0                    # learned monster-HP per second while engaged
+        self.goal = "silver"              # "silver" or "exp" (set from config)
         self._load()
         self._last_tick = 0.0
         self._last_save = time.time()
@@ -194,7 +195,11 @@ class FarmIntel:
         rep = self.zone_report(zone)
         if not rep or rep["hours"] * 3600 < MIN_SAMPLE:
             return None
-        score = rep["exp_h"] + 40 * rep["net_h"]    # EXP first, silver as a tie-breaker
+        if self.goal == "exp":
+            score = rep["exp_h"] + 40 * rep["net_h"]        # EXP first, silver as tie-breaker
+        else:
+            score = rep["net_h"] + rep["exp_h"] / 1000      # silver first (100k EXP ~ 100 silver)
+            score = max(score, 1.0)                         # keep scores positive for the penalties
         if rep["net_h"] < -self.MAX_DEFICIT:
             score *= 0.4        # paying to farm here
         if rep["deaths_h"] >= 1:
@@ -212,6 +217,11 @@ class FarmIntel:
             del self.zones[zid]
         eligible = [z for z, _n, lo, _hi in P.FARM_ZONES
                     if lo <= level + 2 and banned.get(z, 0) < now]
+        # maps whose monsters are 25+ levels below us pay ~nothing (loot 1
+        # silver, tiny EXP): drop them while anything better is available
+        worthwhile = [z for z, _n, _lo, hi in P.FARM_ZONES if z in eligible and hi + 25 >= level]
+        if worthwhile:
+            eligible = worthwhile
         if baseline not in eligible:
             eligible.append(baseline)
         scored = {z: self.zone_score(z) for z in eligible}

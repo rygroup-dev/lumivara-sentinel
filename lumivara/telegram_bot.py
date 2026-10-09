@@ -85,6 +85,22 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
             f"🛒 this session: sold +{au.counts.get('sold_silver', 0)} silver · "
             f"bought {au.counts.get('potions_bought', 0)} potions · deaths {au.counts['revive']}\n"
         )
+        if orch.cfg.enable_market:
+            tc = au.trader.counts
+            open_sells = sum(1 for o in au.trader.my_orders() if o.get("side") == "sell")
+            farm_line += (
+                f"⚖️ Market: sold now +{tc['instant_silver']:,} · listed {tc['listed']} pcs "
+                f"(~{tc['listed_value']:,} silver) · {open_sells} open · "
+                f"cheap potions {tc['bought_potions']}\n"
+            )
+        if orch.cfg.gold_autobuy or au.counts.get("gold_bought"):
+            price = au.last_gold_price
+            farm_line += (
+                f"🥇 Gold auto-buy {'🟢 ON' if orch.cfg.gold_autobuy else '⚪ OFF'} · "
+                f"bought {au.counts.get('gold_bought', 0)} gold for "
+                f"{au.counts.get('gold_silver_spent', 0):,} silver · "
+                f"price {f'{price:,}' if price else '?'} · keeps {orch.cfg.gold_reserve:,}\n"
+            )
         pick = au._zone_pick
         intel = au.intel.summary_lines(st.self_.get("area"))
         if pick or intel:
@@ -125,7 +141,10 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
         ],
         [
             InlineKeyboardButton("💰 Gold Market", callback_data="menu:gold"),
+            InlineKeyboardButton("⚖️ Market now", callback_data="marketnow"),
             InlineKeyboardButton("❤️ Heal now", callback_data="heal"),
+        ],
+        [
             InlineKeyboardButton("🎁 Claim all", callback_data="claimall"),
         ],
         [
@@ -312,6 +331,14 @@ class LumivaraTelegram:
                 for m in (P.claim_quest(), P.claim_daily(), P.mail_claim(), P.claim_hunt()):
                     await orch.client.send(m)
                 note = "Claimed quest/daily/mail/hunt"
+            elif data == "marketnow":
+                au = orch.automator
+                if not orch.cfg.enable_market:
+                    note = "Market is off (ENABLE_MARKET=false in .env)"
+                else:
+                    au.market_requested = True   # farm loop goes to the broker (Return Scroll if needed)
+                    au._last_town_run = 0.0
+                    note = "Going to the market broker"
             elif data == "townrun":
                 au = orch.automator
                 au._last_town_run = 0.0  # allow a shopping run right away

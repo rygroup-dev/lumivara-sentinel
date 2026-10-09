@@ -23,6 +23,7 @@ from . import protocol as P
 from .client import LumivaraClient
 from .config import Config
 from .intel import FarmIntel
+from .market import Trader
 from .state import GameState
 
 log = logging.getLogger("lumivara.auto")
@@ -64,7 +65,9 @@ class Automator:
         self._equip_tries: dict[str, tuple[int, float]] = {}
         self._force_town = False
         self._potion_log: list[tuple[float, str]] = []
-        self.counts.update({"sold_silver": 0, "potions_bought": 0})
+        self.counts.update({"sold_silver": 0, "potions_bought": 0,
+                            "gold_bought": 0, "gold_silver_spent": 0})
+        self.last_gold_price: int | None = None
         # skill learning: skill -> (attempts without progress, blocked until)
         self._skill_fail: dict[str, tuple[int, float]] = {}
         self._skill_last: tuple[str, int] | None = None
@@ -73,6 +76,8 @@ class Automator:
         self.saved_equip: dict | None = None
         # learned per-map / per-mob performance (see intel.py)
         self.intel = FarmIntel(os.path.join(os.path.dirname(self._BAN_FILE), "farm_intel.json"))
+        self.intel.goal = cfg.farm_goal
+        self.trader = Trader(cfg, state, client)
         self._zone_pick: tuple[str, str, float] | None = None   # (zone, reason, chosen at)
         self._target: int | None = None
         self._target_since = 0.0
@@ -81,6 +86,9 @@ class Automator:
         self._equip_refused: set[str] = set()
         self._respec_try = 0.0
         self._travel_fail: dict[str, int] = {}
+        self._good_detour: dict[tuple, tuple[float, float]] = {}
+        self._probe_try = 0.0
+        self.market_requested = False
 
     # ------------------------------------------------------------ helpers
     def _sp(self) -> int:
@@ -250,12 +258,40 @@ class Automator:
         return [(k, int(v)) for k, v in self._inv().items()
                 if isinstance(v, (int, float)) and v > 0 and P.is_sellable_loot(k)]
 
+    def _potion_keep(self) -> int:
+        return max(self.cfg.potion_keep, self.cfg.potion_target)
+
+    def _spare_potions(self) -> int:
+        """Looted Red Potions beyond POTION_KEEP: worth 2 silver each at the merchant."""
+        have = int(self._inv().get(P.POTION_BUY_ENTRY) or 0)
+        keep = self._potion_keep()
+        return have - keep if have > keep + 20 else 0
+
+    def _market_due(self) -> bool:
+        """Worth a broker trip: market on, not visited lately, enough to sell
+        (or the owner asked for one: Telegram button / data/market_now file)."""
+        if not self.cfg.enable_market:
+            return False
+        trigger = os.path.join(os.path.dirname(self._BAN_FILE), "market_now")
+        if os.path.exists(trigger):
+            try:
+                os.remove(trigger)
+            except OSError:
+                pass
+            self.market_requested = True
+        if self.market_requested:
+            return True
+        return (time.time() - self.trader.last_pass > self.cfg.market_every_min * 60
+                and self.trader.stock_value(self._potion_keep()) >= 150)
+
     def _town_needed(self) -> bool:
         if self._force_town:
             return True
         inv = self._inv()
         return bool(
             self._sellable()
+            or self._spare_potions()
+            or self._market_due()
             or int(inv.get(P.POTION_BUY_ENTRY) or 0) < self.cfg.potion_target // 2
             or (self.state.self_.get("classId") == "archer"
                 and int(inv.get(P.ARROW_ENTRY) or 0) < self.cfg.arrow_min)
@@ -268,6 +304,23 @@ class Automator:
         premium savings keep growing."""
         self._last_town_run = time.time()
         self._force_town = False
+
+        # 1) broker first: players pay several times what the NPC does
+        self.market_requested = False
+        if self.cfg.enable_market:
+            if await self._walk_to(P.BROKER_POS):
+                try:
+                    await self.trader.sell_pass(self._potion_keep())
+                    inv = self._inv()
+                    want = self.cfg.potion_target - int(inv.get(P.POTION_BUY_ENTRY) or 0)
+                    silver = int(self.state.self_.get("silver") or 0)
+                    await self.trader.buy_potions(want, silver * self.cfg.potion_budget_pct // 100)
+                except Exception:  # noqa: BLE001 — market trouble must not stop farming
+                    log.exception("market pass failed")
+            else:
+                log.warning("town run: couldn't reach the broker")
+
+        # 2) NPC merchant: whatever the market didn't take, plus restocking
         mx, my = P.MERCHANT_POS
         await self._stand()
         await self.client.send(P.move(mx, my + 20))
@@ -282,6 +335,9 @@ class Automator:
 
         silver0 = int(self.state.self_.get("silver") or 0)
         loot = self._sellable()
+        spare = self._spare_potions()
+        if spare:
+            loot.append((P.POTION_BUY_ENTRY, spare))
         if loot:
             for i in range(0, len(loot), 20):
                 await self.client.send(P.sell_batch(
@@ -318,12 +374,47 @@ class Automator:
                 and int(inv.get(P.ARROW_ENTRY) or 0) < self.cfg.arrow_min):
             await buy(P.ARROW_ENTRY, 2000, 0.1)
 
+        if not os.path.exists(os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")):
+            try:
+                await self.market_probe()
+            except Exception:  # noqa: BLE001
+                log.exception("market probe failed")
+
+    async def _walk_to(self, pos: tuple[int, int], radius: float = P.NPC_RANGE - 15) -> bool:
+        """Walk to a town NPC; True once within `radius`."""
+        mx, my = pos
+        await self._stand()
+        await self.client.send(P.move(mx, my + 20))
+        for i in range(30):
+            await asyncio.sleep(0.5)
+            px, py = self.state.position()
+            if (px - mx) ** 2 + (py - my) ** 2 <= radius ** 2:
+                return True
+            if i % 6 == 5:
+                await self.client.send(P.move(mx, my + 20))
+        return False
+
+    @staticmethod
+    def _detours_for(key, start: tuple[float, float], portal: tuple[int, int]) -> list:
+        """Candidate waypoints around an obstacle between `start` and `portal`:
+        the two L-shaped corners, then points 400px to either side."""
+        sx, sy = start
+        tx, ty = portal
+        dx, dy = tx - sx, ty - sy
+        n = max(1.0, (dx * dx + dy * dy) ** 0.5)
+        nx, ny = -dy / n, dx / n                     # perpendicular to the straight line
+        mx, my = (sx + tx) / 2, (sy + ty) / 2
+        pts = [(sx, ty), (tx, sy),
+               (mx + nx * 400, my + ny * 400), (mx - nx * 400, my - ny * 400),
+               (sx + nx * 400, sy + ny * 400), (sx - nx * 400, sy - ny * 400)]
+        return [(max(60.0, x), max(60.0, y)) for x, y in pts]
+
     async def go_to(self, want: str) -> bool:
         """Take one portal hop toward `want`: stop fighting, walk to the portal,
         then travel. Keeps drinking potions on the way. Returns True if the
         travel request was sent (the server then closes the socket with 4100)."""
         area = self.state.self_.get("area")
-        hop = P.next_hop(area, want)
+        hop = P.next_hop(area, want, int(self.state.self_.get("level") or 1))
         portal = P.PORTALS.get(area, {}).get(hop)
         self._last_travel = time.time()
         self.counts["travel"] += 1
@@ -335,16 +426,44 @@ class Automator:
         await self._stand()
         await self.client.send(P.stop())
         start_pos = self.state.position()
-        deadline = time.time() + 60
+        deadline = time.time() + 75
         last_move = 0.0
+        # Moves go in a straight line, so a wall/river between us and the
+        # portal stops us dead. When we stop closing in, walk via a detour
+        # point first; a detour that worked is remembered for next time.
+        key = (area, hop)
+        detours = self._detours_for(key, start_pos, portal)
+        goal: tuple[float, float] = portal
+        via: tuple[float, float] | None = self._good_detour.get(key)
+        if via:
+            goal = via
+        best_d, best_at = float("inf"), time.time()
         while time.time() < deadline and self.state.connected:
             if self.state.is_dead() or self.state.self_.get("area") != area:
                 return False
             px, py = self.state.position()
             if (px - portal[0]) ** 2 + (py - portal[1]) ** 2 <= P.PORTAL_RANGE ** 2:
                 self._travel_fail.pop(want, None)
+                if via:
+                    self._good_detour[key] = via
                 await self.client.send(P.travel(hop))
                 return True
+            d_goal = ((px - goal[0]) ** 2 + (py - goal[1]) ** 2) ** 0.5
+            if goal != portal and d_goal <= 60:
+                goal, last_move = portal, 0.0          # reached the detour point
+                best_d, best_at = float("inf"), time.time()
+                continue
+            if d_goal < best_d - 40:
+                best_d, best_at = d_goal, time.time()
+            elif time.time() - best_at > 4:
+                # stuck: next detour (or back to the portal from wherever we are)
+                if goal == portal and via and self._good_detour.get(key) == via:
+                    self._good_detour.pop(key, None)    # remembered route stopped working
+                via = detours.pop(0) if detours else None
+                goal = via or portal
+                best_d, best_at, last_move = float("inf"), time.time(), 0.0
+                if via:
+                    log.debug("travel stuck at (%d,%d) — detour via %s", px, py, via)
             stock = self.hp_potion_stock()
             if (self.state.hp_percent() <= self.cfg.potion_hp_percent and self._potion_ready()
                     and (stock is None or stock > 0)):
@@ -352,7 +471,7 @@ class Automator:
                 await self.client.send_now(P.potion())
             if time.time() - last_move > 3:
                 last_move = time.time()
-                await self.client.send(P.move(*portal))
+                await self.client.send(P.move(int(goal[0]), int(goal[1])))
             await asyncio.sleep(0.5)
         fails = self._travel_fail.get(want, 0) + 1
         self._travel_fail[want] = fails
@@ -590,14 +709,25 @@ class Automator:
             now = time.time()
             area = self.state.self_.get("area")
 
-            # 3) free build reset (passive skills / class stats) at the Reset Master
-            if self.respec_due():
+            # 3) town errands: free build reset at the Reset Master, market look at the broker
+            probe_due = self._market_probe_due()
+            market_due = self._market_due()
+            if self.respec_due() or probe_due or market_due:
                 if area == P.TOWN:
-                    await self.respec_if_needed()
-                    continue
-                if (area in P.FARM_ZONE_IDS and int(self._inv().get(P.RETURN_SCROLL) or 0) > 0
+                    if self.respec_due():
+                        await self.respec_if_needed()
+                        continue
+                    if probe_due:
+                        self._probe_try = now
+                        await self.market_probe()
+                        continue
+                    # market_due: the town run below does the broker pass
+                elif (area in P.FARM_ZONE_IDS and int(self._inv().get(P.RETURN_SCROLL) or 0) > 0
                         and now - self._last_recall > 120):
-                    log.info("build reset pending — returning to town for the Reset Master")
+                    log.info("town errand pending (%s) — returning to town",
+                             "build reset" if self.respec_due() else
+                             "market check" if probe_due else
+                             f"market: ~{self.trader.stock_value(self._potion_keep()):.0f} silver to sell")
                     self._last_recall = now
                     await self.client.send(P.use_item(P.RETURN_SCROLL))
                     await asyncio.sleep(2)
@@ -939,6 +1069,119 @@ class Automator:
 
     async def open_storage(self) -> None:
         await self.client.send(P.storage_open())
+
+    # ----------------------------------------------------------- gold loop
+    async def gold_loop(self) -> None:
+        """Every 10 minutes: if silver is above GOLD_RESERVE, buy gold at the
+        best ask (when it is under GOLD_MAX_PRICE) with the spare silver."""
+        await asyncio.sleep(45)
+        probe = os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")
+        for _ in range(60):     # up to 5 min: wait out map changes / reconnects
+            if os.path.exists(probe):
+                break
+            if (self.state.connected and self.state.self_ and not self.state.is_dead()
+                    and time.time() - self._last_travel > 20):
+                try:
+                    await self.market_probe()
+                except Exception:  # noqa: BLE001
+                    log.exception("market probe failed")
+                break
+            await asyncio.sleep(5)
+        await asyncio.sleep(15)
+        while not self._stop:
+            try:
+                if (self.cfg.gold_autobuy and self.state.connected
+                        and not self.state.is_dead() and self.state.self_):
+                    await self.buy_gold()
+            except Exception:  # noqa: BLE001 — never let this kill the bot
+                log.exception("gold auto-buy failed")
+            await asyncio.sleep(600)
+
+    async def buy_gold(self) -> int:
+        """One conversion pass. Returns the gold quantity ordered (0 = none)."""
+        silver = int(self.state.self_.get("silver") or 0)
+        spend = silver - self.cfg.gold_reserve
+        if spend < 1000:                    # not worth a look yet (1 gold ~ 6.5k silver)
+            return 0
+        await self.client.send(P.gold_watch())
+        await asyncio.sleep(3)
+        await self.client.send(P.gold_close())
+        asks = [a for a in ((self.state.gold_market.get("depth") or {}).get("asks") or [])
+                if isinstance(a, dict) and a.get("price")]
+        if not asks:
+            log.info("gold: no sellers on the exchange right now")
+            return 0
+        asks.sort(key=lambda a: a["price"])
+        best = int(asks[0]["price"])
+        self.last_gold_price = best
+        if best > self.cfg.gold_max_price:
+            log.info("gold: best ask %d silver > GOLD_MAX_PRICE %d — waiting", best, self.cfg.gold_max_price)
+            return 0
+        # buy only what the cheapest level holds, with ~5% headroom for fees
+        qty = min(int(spend // (best * 1.05)), int(asks[0].get("quantity") or 0))
+        if qty < 1:
+            log.info("gold: %d spare silver < 1 gold at %d", spend, best)
+            return 0
+        log.info("gold: buying %d gold at %d silver (spare silver %d, keeping %d)",
+                 qty, best, spend, self.cfg.gold_reserve)
+        await self.client.send(P.gold_order("buy", best, qty, budget=spend))
+        await asyncio.sleep(3)
+        after = int(self.state.self_.get("silver") or 0)
+        paid = silver - after
+        if paid > 0:
+            self.counts["gold_bought"] += qty
+            self.counts["gold_silver_spent"] += paid
+            log.info("gold: bought %d gold for %d silver (silver now %d)", qty, paid, after)
+        else:
+            log.warning("gold: order sent but silver unchanged — exchange refused it")
+        return qty
+
+    # -------------------------------------------------------- market probe
+    def _market_probe_due(self) -> bool:
+        path = os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")
+        return not os.path.exists(path) and time.time() - self._probe_try > 1800
+
+    async def market_probe(self, items: list[str] | None = None) -> str:
+        """Read-only look at the player market: query a few boards and save
+        everything the server answers to data/market_probe.json."""
+        inv = self._inv()
+        if not items:
+            cards = [k for k, v in inv.items() if "card" in k and v]
+            loot = [k for k, v in inv.items() if v and P.is_sellable_loot(k) and "card" not in k]
+            items = ["potion", "refine_stone"] + cards[:2] + loot[:2]
+        if self.state.self_.get("area") != P.TOWN:
+            log.info("market probe: not in town — will run on the next town visit")
+            return ""
+        if not await self._walk_to(P.BROKER_POS):
+            log.warning("market probe: couldn't reach the broker")
+            return ""
+        tap: list = []
+        self.state.raw_tap = tap
+        out = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "area": self.state.self_.get("area"),
+               "pos": self.state.position(), "boards": {}}
+        try:
+            for n, item in enumerate(items, 1):
+                before = self.state.market_at
+                await self.client.send(P.market_depth(item, ask=n))
+                for _ in range(10):
+                    await asyncio.sleep(0.5)
+                    if self.state.market_at > before:
+                        break
+                out["boards"][item] = (json.loads(json.dumps(self.state.market, default=str))
+                                       if self.state.market_at > before else None)
+            await self.client.send(P.market_close())
+            await asyncio.sleep(1)
+        finally:
+            self.state.raw_tap = None
+        out["my_orders"] = list(self.state.market_orders.values())
+        out["my_listings"] = list(self.state.market_listings.values())
+        out["messages"] = tap[-40:]
+        path = os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=1, default=str)
+        got = sum(1 for b in out["boards"].values() if b)
+        log.info("market probe: %d/%d boards answered (%s) -> %s", got, len(items), ", ".join(items), path)
+        return path
 
     async def watch_gold(self) -> None:
         await self.client.send(P.gold_watch())

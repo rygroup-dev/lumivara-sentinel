@@ -18,6 +18,7 @@ Key findings encoded here:
 from __future__ import annotations
 
 import copy
+import math
 
 WS_URL = "wss://lumivaraonline.com/api/ws?v=8&chat=id"
 API_BASE = "https://lumivaraonline.com"
@@ -94,11 +95,21 @@ PORTALS = {
 PORTAL_RANGE = 90
 
 
-def next_hop(src: str | None, dst: str) -> str:
+def _zone_min_level(zone: str) -> int:
+    return next((lo for z, _n, lo, _hi in FARM_ZONES if z == zone), 0)
+
+
+def next_hop(src: str | None, dst: str, level: int | None = None) -> str:
     """First zone to travel to on the shortest portal path src -> dst
-    (falls back to dst when the route is unknown)."""
+    (falls back to dst when the route is unknown). With `level`, the route
+    never passes *through* a map whose monsters are well above us — walking
+    across Frostfang Glacier at Lv49 is a death trip; going via town is not."""
     if not src or src == dst or src not in ZONE_LINKS:
         return dst
+
+    def passable(z: str) -> bool:
+        return z == dst or level is None or _zone_min_level(z) <= level + 5
+
     prev = {src: None}
     queue = [src]
     while queue:
@@ -106,9 +117,11 @@ def next_hop(src: str | None, dst: str) -> str:
         if cur == dst:
             break
         for nxt in ZONE_LINKS.get(cur, []):
-            if nxt not in prev:
+            if nxt not in prev and passable(nxt):
                 prev[nxt] = cur
                 queue.append(nxt)
+    if dst not in prev and level is not None:
+        return next_hop(src, dst)       # no safe route: fall back to the shortest
     if dst not in prev:
         return dst
     hop = dst
@@ -117,10 +130,43 @@ def next_hop(src: str | None, dst: str) -> str:
     return hop
 
 
-def gold_order(side: str, price: int, quantity: int) -> dict:
+def gold_order(side: str, price: int, quantity: int, budget: int | None = None) -> dict:
     """Gold Exchange order (from client code). side is "buy" or "sell"; price is
-    silver per gold. Not sent automatically — currency-moving."""
-    return {"type": "goldOrder", "side": side, "price": int(price), "quantity": int(quantity), "instant": True}
+    the limit in silver per gold; `instant` fills against the book now. For an
+    instant buy the client also sends `budget` = most silver it may spend
+    (fees included) — the server never takes more than that."""
+    m = {"type": "goldOrder", "side": side, "price": int(price), "quantity": int(quantity), "instant": True}
+    if budget is not None:
+        m["budget"] = int(budget)
+    return m
+
+
+def market_depth(item: str, page: int = 0, size: int = 20, ask: int = 1, **query) -> dict:
+    """Player-market board for one item (read-only), as the client sends it."""
+    return {"type": "marketGetDepth", "item": item,
+            "query": {"sort": "priceAsc", "page": page, "size": size, **query, "ask": ask}}
+
+
+def market_order(side: str, item: str, price: int, quantity: int, instant: bool = False) -> dict:
+    """Item order on the player market (silver). side "sell" lists our stack,
+    "buy" places a bid; instant=True fills against the book immediately."""
+    m = {"type": "marketCreateOrder", "side": side, "item": item,
+         "price": int(price), "quantity": int(quantity)}
+    if instant:
+        m["instant"] = True
+    return m
+
+
+def market_list_gear(gear_id: str, price: int) -> dict:
+    return {"type": "marketListGear", "gearId": gear_id, "price": int(price)}
+
+
+def market_cancel_order(order_id: str) -> dict:
+    return {"type": "marketCancelOrder", "orderId": order_id}
+
+
+def market_close() -> dict:
+    return {"type": "marketClose"}
 
 
 def gold_cancel(order_id: str) -> dict:
@@ -150,6 +196,7 @@ def shop_buy(entry: str, quantity: int) -> dict:
 TOWN = "rome"
 NPC_RANGE = 110
 MERCHANT_POS = (1090, 700)   # Silver merchant: buys loot, sells potions/arrows
+BROKER_POS = (1320, 740)     # Market broker: the player market only answers next to him
 POTION_BUY_ENTRY = "potion"  # Red Potion, 10 silver, best silver-per-HP
 POTION_PRICE = 10
 ARROW_ENTRY = "iron_arrow"   # 0.1 silver each, one per shot
@@ -310,6 +357,54 @@ def loot_price(mob_key: str) -> int:
 
 def mob_silver_per_kill(mob_key: str) -> float:
     return LOOT_DROP_RATE * loot_price(mob_key)
+
+
+# monster material item -> monster (client table)
+LOOT_ITEM_MOB = {
+    "jelly": "prism-hopper", "sprout_leaf": "leaf-sprout", "dewdrop_tuft": "dew-bunny",
+    "moss_spore_cap": "moss-mushroom", "pixie_thorn": "thorn-pixie",
+    "bramble_fur": "bramble-hare", "honey_wing_dust": "honey-moth", "twisted_root": "rootling",
+    "amber_shell": "amber-beetle", "frost_fluff": "frost-puff", "icicle_whisker": "icicle-hare",
+    "snow_feather": "snow-owl", "aurora_tail": "aurora-fox", "gecko_scale": "dune-gecko",
+    "scarab_carapace": "scarab-sentinel", "cobra_fang": "sunscale-cobra",
+    "cactus_needle": "cactus-imp", "crab_claw": "tide-crab", "toad_wart": "bog-toad",
+    "newt_tail": "mud-newt", "mire_gel": "mire-jelly", "mantis_blade": "reed-mantis",
+    "wolf_fang": "forest-wolf", "wisp_ember": "lantern-wisp",
+    "smoldering_antler": "ember-antler", "moonlit_plume": "moon-owl", "lynx_claw": "vine-lynx",
+    "boar_tusk": "wild-boar", "drake_scale": "sand-drake", "bat_wing": "cave-bat",
+    "golem_core": "pebble-golem", "magma_scale": "magma-salamander",
+    "cinder_fang": "ember-hound", "basalt_shell": "basalt-tortoise",
+    "obsidian_stinger": "obsidian-scorpion", "shade_feather": "shade-raven",
+    "hound_bone": "bone-hound", "wraith_shroud": "bog-wraith", "grave_crest": "grave-knight",
+    "quartz_leg": "quartz-crawler", "geode_plate": "geode-armadillo",
+    "prism_scale": "prism-serpent", "wyvern_scale": "amethyst-wyvern",
+    "thunder_horn": "thunder-ram", "roc_plume": "storm-roc", "cloud_pearl": "cloud-serpent",
+    "tempest_dragon_scale": "tempest-drake", "sun_plate": "gilded-sentinel",
+    "griffin_quill": "radiant-griffin", "fallen_halo": "fallen-seraph",
+    "sun_core": "sunfire-colossus",
+}
+# NPC merchant buy-back price for items that aren't monster materials
+NPC_PRICES = {"potion": 2, "orange_potion": 3, "yellow_potion": 4, "white_potion": 5}
+
+# Player-market fees (client constants): 2.5% listing fee paid up front,
+# 8% tax on what sells (less with premium), 1% on buy orders.
+MARKET_LISTING_FEE = 0.025
+MARKET_SALE_TAX = 0.08
+MARKET_BUY_FEE = 0.01
+
+
+def npc_price(item: str) -> int:
+    """Silver the town merchant pays per unit (0 = unknown / not sellable there)."""
+    mob = LOOT_ITEM_MOB.get(item)
+    if mob:
+        return loot_price(mob)
+    return NPC_PRICES.get(item, 0)
+
+
+def market_net(price: float, qty: int = 1) -> float:
+    """Silver kept from selling qty at price on the player market (after fees)."""
+    total = price * qty
+    return total - math.floor(total * MARKET_SALE_TAX) - math.ceil(total * MARKET_LISTING_FEE)
 
 
 # HP potion items used by the "potion" hotbar action (red first, per in-game label)

@@ -33,6 +33,11 @@ async def _post_init(app: Application) -> None:
     tg: LumivaraTelegram = app.bot_data["tg"]
     loop = asyncio.get_running_loop()
 
+    async def _notify(text: str) -> None:
+        await app.bot.send_message(orch.cfg.owner_chat_id, text, parse_mode="HTML",
+                                   disable_notification=False)
+    orch.automator.notify_cb = _notify
+
     orch.tasks = [
         loop.create_task(orch.client.run(), name="ws-run"),
         loop.create_task(orch.client.ping_loop(), name="ws-ping"),

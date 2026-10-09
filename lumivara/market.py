@@ -37,8 +37,13 @@ class Trader:
         self.client = client
         self.prices: dict[str, dict] = {}     # item -> last analysed board
         self.last_pass = 0.0
-        self.counts = {"instant_silver": 0, "listed": 0, "listed_value": 0, "bought_potions": 0}
+        self.counts = {"instant_silver": 0, "listed": 0, "listed_value": 0, "bought_potions": 0,
+                       "filled_value": 0}
         self._ask = 100
+        self.notify = lambda *a, **k: None    # replaced by Automator.notify
+        self._known_orders: dict[str, dict] = {}   # my open orders seen on the last pass
+        self._cancelled: set[str] = set()
+        self._viewed: set[str] = set()
 
     # -------------------------------------------------------------- boards
     async def board(self, item: str) -> dict | None:
@@ -77,17 +82,31 @@ class Trader:
         s = self.state.self_
         inv = s.get("inventory") if isinstance(s.get("inventory"), dict) else {}
         locked = set(s.get("lockedItems") or [])
+        # `gifted` = reward/gift units of an item: they can't be traded, and an
+        # order for more than the tradable rest is refused outright
+        gifted = s.get("gifted") if isinstance(s.get("gifted"), dict) else {}
         out = []
-        for item, n in inv.items():
-            n = int(n or 0) if isinstance(n, (int, float)) else 0
-            if n <= 0 or item in locked:
+        for item, total in inv.items():
+            total = int(total or 0) if isinstance(total, (int, float)) else 0
+            tradable = total - int(gifted.get(item) or 0)
+            if tradable <= 0 or item in locked or item in P.UNTRADABLE:
                 continue
+            # how many to keep for our own use (gifted units count towards it)
             if item in P.LOOT_ITEM_MOB or item == "refine_stone":
+                keep = 0
+            elif item.endswith("_card"):
+                if not self.cfg.market_sell_cards:
+                    continue
+                keep = 0
+            elif item in P.MARKET_SELL_KEEP:
+                keep = P.MARKET_SELL_KEEP[item]
+            elif item == P.POTION_BUY_ENTRY:
+                keep = keep_potions + 20
+            else:
+                continue
+            n = min(tradable, total - keep)
+            if n > 0:
                 out.append((item, n))
-            elif self.cfg.market_sell_cards and item.endswith("_card"):
-                out.append((item, n))
-            elif item == P.POTION_BUY_ENTRY and n > keep_potions + 20:
-                out.append((item, n - keep_potions))
         return out
 
     @staticmethod
@@ -128,6 +147,7 @@ class Trader:
             created = o.get("createdAt") or 0
             created = created / 1000 if created > 1e11 else created     # ms -> s
             if o.get("side") == "sell" and created and created < cutoff:
+                self._cancelled.add(o["id"])
                 await self.client.send(P.market_cancel_order(o["id"]))
                 n += 1
                 await asyncio.sleep(0.8)
@@ -138,7 +158,26 @@ class Trader:
     async def sell_pass(self, keep_potions: int) -> dict:
         """One selling round at the broker. Returns a summary."""
         self.last_pass = time.time()
+        tap: list = []
+        self.state.raw_tap = tap
+        try:
+            return await self._sell_pass(keep_potions)
+        finally:
+            self.state.raw_tap = None
+            notes = [m for m in tap if m.get("type") not in ("pong", "chatline", "snapshot")]
+            for m in notes[:15]:
+                log.info("market reply: %s", str(m)[:300])
+
+    async def _sell_pass(self, keep_potions: int) -> dict:
+        self._viewed = set()
         await self.reprice_stale()
+        # refresh the boards of items we have listed but no longer carry, so
+        # their order rows (filled or not) come back
+        carried = {i for i, _ in self.candidates(keep_potions)}
+        for item in {o.get("item") for o in self._known_orders.values()} - carried:
+            if item and await self.board(item) is not None:
+                self._viewed.add(item)
+                await asyncio.sleep(0.6)
         open_items = self._open_sell_items()
         summary = {"instant": [], "listed": [], "npc": [], "keep": []}
         silver0 = int(self.state.self_.get("silver") or 0)
@@ -149,6 +188,7 @@ class Trader:
             if b is None:
                 log.info("market: no board for %s (not at the broker?)", item)
                 break
+            self._viewed.add(item)
             action = self.plan(item, qty, b)
             kind = action[0]
             if kind == "instant":
@@ -173,29 +213,69 @@ class Trader:
                  summary["instant"] or "-", summary["listed"] or "-", summary["npc"] or "-",
                  summary["keep"] or "-", gained)
         mine = self.my_orders()
-        log.info("market: my open orders (me=%s, %d rows seen): %s", self.state.self_.get("id"),
-                 len(self.state.market_orders), ", ".join(
+        log.info("market: my open orders: %s", ", ".join(
             f"{o.get('side')} {o.get('item')} {o.get('quantity')}/{o.get('initialQuantity')}@{o.get('price')}"
             for o in mine) or "none seen")
+
+        # listings that vanished since the last pass (and weren't cancelled by us)
+        # sold — judged only for items whose board we refreshed this pass
+        now_ids = {o["id"]: o for o in mine if o.get("id")}
+        filled = []
+        for oid, o in self._known_orders.items():
+            if oid in now_ids or oid in self._cancelled or o.get("side") != "sell":
+                continue
+            if o.get("item") in self._viewed:
+                filled.append(o)
+            else:
+                now_ids[oid] = o            # unknown yet: keep watching it
+        # partly filled ones count too
+        for oid, o in now_ids.items():
+            old = self._known_orders.get(oid)
+            if old and int(old.get("quantity") or 0) > int(o.get("quantity") or 0):
+                filled.append({**o, "quantity": int(old["quantity"]) - int(o["quantity"])})
+        self._known_orders = now_ids
+        self._cancelled.clear()
+        filled_value = int(sum(P.market_net(int(o.get("price") or 0), int(o.get("quantity") or 0))
+                               for o in filled))
+        self.counts["filled_value"] += filled_value
+
+        lines = []
+        if gained >= 200 or summary["instant"] and gained >= 100:
+            lines.append(f"sold now: {', '.join(summary['instant'])} → <b>{gained:+,}</b> silver")
+        if filled_value >= 200:
+            lines.append("listings sold: " + ", ".join(
+                f"{o.get('item')} x{o.get('quantity')}@{o.get('price')}" for o in filled)
+                + f" → ~<b>{filled_value:,}</b> silver")
+        listed_value = sum(int(P.market_net(int(x.rsplit('@', 1)[1]), int(x.split(' x')[1].split('@')[0])))
+                           for x in summary["listed"])
+        if listed_value >= 500:
+            lines.append(f"listed ~{listed_value:,} silver: {', '.join(summary['listed'])}")
+        if lines:
+            self.notify("⚖️ <b>Market</b>\n" + "\n".join(lines) +
+                        f"\nsilver now {int(self.state.self_.get('silver') or 0):,}",
+                        key=f"market{time.time()}", cooldown=0)
         return summary
 
-    async def buy_potions(self, want: int, budget: int) -> int:
-        """Buy Red Potions from players when cheaper than the NPC's 10 silver."""
-        if want <= 0 or budget <= 0:
+    async def buy_cheap(self, item: str, want: int, budget: int) -> int:
+        """Buy from players when their cheapest offer undercuts the NPC
+        (Red Potion 10, Return Scroll 30). Returns how many we got."""
+        npc = P.NPC_BUY_PRICES.get(item)
+        if not npc or want <= 0 or budget <= 0:
             return 0
-        b = await self.board(P.POTION_BUY_ENTRY)
-        if not b or not b["ask"] or b["ask"] >= P.POTION_PRICE:
+        b = await self.board(item)
+        if not b or not b["ask"] or b["ask"] * (1 + P.MARKET_BUY_FEE) >= npc:
             return 0
         qty = min(want, b["ask_qty"], int(budget // (b["ask"] * (1 + P.MARKET_BUY_FEE))))
         if qty <= 0:
             return 0
-        before = int((self.state.self_.get("inventory") or {}).get(P.POTION_BUY_ENTRY) or 0)
-        await self.client.send(P.market_order("buy", P.POTION_BUY_ENTRY, b["ask"], qty, instant=True))
+        before = int((self.state.self_.get("inventory") or {}).get(item) or 0)
+        await self.client.send(P.market_order("buy", item, b["ask"], qty, instant=True))
         await asyncio.sleep(1.5)
-        got = int((self.state.self_.get("inventory") or {}).get(P.POTION_BUY_ENTRY) or 0) - before
+        got = int((self.state.self_.get("inventory") or {}).get(item) or 0) - before
         if got > 0:
-            self.counts["bought_potions"] += got
-            log.info("market: bought %d potions at %d (NPC sells at %d)", got, b["ask"], P.POTION_PRICE)
+            if item == P.POTION_BUY_ENTRY:
+                self.counts["bought_potions"] += got
+            log.info("market: bought %s x%d at %d (NPC sells at %d)", item, got, b["ask"], npc)
         return max(got, 0)
 
     def stock_value(self, keep_potions: int) -> float:
@@ -203,6 +283,7 @@ class Trader:
         total = 0.0
         for item, qty in self.candidates(keep_potions):
             p = self.prices.get(item)
-            unit = (p["bid"] or p["avg"]) if p else P.npc_price(item) * 5
+            unit = ((p["bid"] or p["avg"]) if p
+                    else P.MARKET_PRICE_HINT.get(item) or P.npc_price(item) * 5)
             total += unit * qty
         return total

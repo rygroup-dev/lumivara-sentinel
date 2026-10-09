@@ -78,6 +78,7 @@ class Automator:
         self.intel = FarmIntel(os.path.join(os.path.dirname(self._BAN_FILE), "farm_intel.json"))
         self.intel.goal = cfg.farm_goal
         self.trader = Trader(cfg, state, client)
+        self.trader.notify = self.notify
         self._zone_pick: tuple[str, str, float] | None = None   # (zone, reason, chosen at)
         self._target: int | None = None
         self._target_since = 0.0
@@ -89,6 +90,64 @@ class Automator:
         self._good_detour: dict[tuple, tuple[float, float]] = {}
         self._probe_try = 0.0
         self.market_requested = False
+        self.notify_cb = None             # async (text) -> None, set by the app (Telegram)
+        self._notified: dict[str, float] = {}
+        self._offline_since = 0.0
+        self._last_level = 0
+        self._last_rare: dict[str, int] | None = None
+
+    # ------------------------------------------------------- notifications
+    def notify(self, text: str, key: str | None = None, cooldown: float = 600) -> None:
+        """Telegram message for something the owner would want to know. The
+        same `key` is sent at most once per `cooldown` seconds (no spam)."""
+        if not self.notify_cb:
+            return
+        now = time.time()
+        k = key or text
+        if now - self._notified.get(k, 0) < cooldown:
+            return
+        self._notified[k] = now
+
+        async def _send() -> None:
+            try:
+                await self.notify_cb(text)
+            except Exception:  # noqa: BLE001 — a failed notification must never matter
+                log.debug("notify failed", exc_info=True)
+        asyncio.get_running_loop().create_task(_send())
+
+    def _watch_events(self) -> None:
+        """Level-ups, rare drops, long disconnects — checked by the status loop."""
+        s = self.state.self_
+        now = time.time()
+        if not self.state.connected:
+            if self._offline_since == 0.0:
+                self._offline_since = now
+            elif now - self._offline_since > 300:
+                self.notify("⚠️ <b>Lost the game connection</b> for 5+ minutes — still retrying. "
+                            "If it doesn't come back, the cookie may have expired.",
+                            key="offline", cooldown=3600)
+            return
+        if self._offline_since and now - self._offline_since > 300:
+            self.notify("✅ Game connection is back.", key="online", cooldown=600)
+        self._offline_since = 0.0
+        if not s:
+            return
+        lvl = int(s.get("level") or 0)
+        if self._last_level and lvl > self._last_level:
+            self.notify(f"🎉 <b>Level {lvl}</b> · {s.get('classId')} · silver {int(s.get('silver') or 0):,}",
+                        key=f"lvl{lvl}", cooldown=86400)
+        self._last_level = lvl or self._last_level
+        inv = self._inv()
+        rare = {k: int(v or 0) for k, v in inv.items()
+                if isinstance(v, (int, float)) and (k.endswith("_card") or k in P.RARE_DROPS)}
+        if self._last_rare is not None:
+            for k, n in rare.items():
+                if n > self._last_rare.get(k, 0):
+                    p = self.trader.prices.get(k)
+                    worth = f" · market ~{(p['avg'] or p['bid']):,.0f} silver" if p and (p['avg'] or p['bid']) else ""
+                    self.notify(f"💎 <b>Rare drop:</b> {k.replace('_', ' ')} (now {n}){worth}",
+                                key=f"drop{k}{n}", cooldown=60)
+        self._last_rare = rare
 
     # ------------------------------------------------------------ helpers
     def _sp(self) -> int:
@@ -215,18 +274,59 @@ class Automator:
         w = self._stat_weights()
         return min(w, key=lambda s: (stats.get(s, 1) or 1) / w[s])
 
+    def _is_magic(self) -> bool:
+        return self.state.self_.get("classId") in P.MAGIC_CLASSES
+
     def _gear_score(self, g: dict) -> float:
         bonus = g.get("bonuses") or {}
         weights = self._stat_weights()
+        magic = self._is_magic()
         score = 0.0
         for k, v in bonus.items():
             if not isinstance(v, (int, float)):
                 continue
+            if (k == "matk" and not magic) or (k == "atk" and magic):
+                continue        # the other damage type does nothing for us
             base = P.GEAR_SCORE.get(k, 0.3)
             if k in ("str", "agi", "vit", "int", "dex", "luk"):
-                base = 0.5 + weights.get(k, 0)  # stats we build for count more
+                base = 0.2 + weights.get(k, 0)  # only the stats we build for really count
             score += base * v
         return score + 0.5 * (g.get("refine") or 0) + 0.2 * (g.get("tier") or 0)
+
+    def gear_level_ok(self, g: dict) -> bool:
+        """Tier I-V gear needs Lv 1/20/40/60/80 (client rule)."""
+        tier = int(g.get("tier") or 1)
+        need = P.TIER_LEVEL[max(1, min(5, tier)) - 1]
+        return int(self.state.self_.get("level") or 1) >= max(need, int(g.get("level") or 1))
+
+    def gear_value(self, g: dict) -> float:
+        """How good a piece is for us in its slot (weapons: damage first)."""
+        score = self._gear_score(g)
+        if g.get("slot") == P.WEAPON_SLOT:
+            bonus = g.get("bonuses") or {}
+            score += (bonus.get("matk", 0) if self._is_magic() else bonus.get("atk", 0)) * 10
+        return score
+
+    def worn_slot(self, g: dict) -> str | None:
+        """Equipment slot a piece occupies for us, or None if we can't wear it.
+        A bow is two-handed: the quiver (slot "ammo") sits in the shield hand
+        and real shields can't be worn at all."""
+        slot = g.get("slot")
+        bow = self._weapon_template() in P.TWO_HANDED
+        if slot == "ammo":
+            return "shield" if bow else None
+        if slot == "shield" and bow:
+            return None
+        return slot
+
+    def _weapon_template(self) -> str | None:
+        worn = self.state.self_.get("equipped") or {}
+        wid = worn.get(P.WEAPON_SLOT)
+        tpl = self.state.gear.get(wid, {}).get("template") if wid else None
+        if tpl:
+            return tpl
+        allowed = P.CLASS_WEAPONS.get(self.state.self_.get("classId")) or []
+        return allowed[0] if allowed else None
 
     def best_gear(self) -> dict[str, str]:
         """{slot: gear id} — the best item we own for each slot, for our class."""
@@ -234,20 +334,39 @@ class Automator:
         allowed = P.CLASS_WEAPONS.get(cls)
         best: dict[str, tuple[float, str]] = {}
         for gid, g in self.state.gear.items():
-            slot = g.get("slot")
-            if not slot or gid in self._equip_refused:
+            if gid in self._equip_refused or not self.gear_level_ok(g):
                 continue
-            if slot == P.WEAPON_SLOT:
-                if allowed and g.get("template") not in allowed:
-                    continue
-                bonus = g.get("bonuses") or {}
-                magic = cls in ("mage", "acolyte", "nekobaku")
-                score = (bonus.get("matk", 0) if magic else bonus.get("atk", 0)) * 10 + self._gear_score(g)
-            else:
-                score = self._gear_score(g)
+            if g.get("slot") == P.WEAPON_SLOT and allowed and g.get("template") not in allowed:
+                continue
+            slot = self.worn_slot(g)
+            if not slot:
+                continue
+            score = self.gear_value(g)
             if slot not in best or score > best[slot][0]:
                 best[slot] = (score, gid)
         return {slot: gid for slot, (_s, gid) in best.items()}
+
+    def spare_gear(self) -> list[dict]:
+        """Gear we will never wear: not on us, not locked, and either for
+        another class or worse than what we already have in that slot."""
+        worn_ids = set((self.state.self_.get("equipped") or {}).values())
+        best = self.best_gear()
+        cls = self.state.self_.get("classId")
+        allowed = P.CLASS_WEAPONS.get(cls)
+        out = []
+        for gid, g in self.state.gear.items():
+            if gid in worn_ids or gid in best.values() or g.get("locked") or g.get("cards"):
+                continue
+            slot = self.worn_slot(g)
+            other_class = (g.get("slot") == P.WEAPON_SLOT and allowed
+                           and g.get("template") not in allowed) or slot is None
+            if other_class:
+                out.append(g)
+                continue
+            top = best.get(slot)
+            if top and self.gear_value(g) < self.gear_value(self.state.gear.get(top, {})):
+                out.append(g)
+        return out
 
     # ---------------------------------------------------------- town run
     def _inv(self) -> dict:
@@ -314,7 +433,10 @@ class Automator:
                     inv = self._inv()
                     want = self.cfg.potion_target - int(inv.get(P.POTION_BUY_ENTRY) or 0)
                     silver = int(self.state.self_.get("silver") or 0)
-                    await self.trader.buy_potions(want, silver * self.cfg.potion_budget_pct // 100)
+                    await self.trader.buy_cheap(P.POTION_BUY_ENTRY, want,
+                                                silver * self.cfg.potion_budget_pct // 100)
+                    if int(inv.get(P.RETURN_SCROLL) or 0) < 3:
+                        await self.trader.buy_cheap(P.RETURN_SCROLL, 10, 300)
                 except Exception:  # noqa: BLE001 — market trouble must not stop farming
                     log.exception("market pass failed")
             else:
@@ -591,6 +713,8 @@ class Automator:
             self._ban_zone(area, 1800)
             self._deaths = [d for d in self._deaths if d[1] != area]
             log.warning("died 3x in %s within 15 min — avoiding it for 30 min", area)
+            self.notify(f"⚠️ Died 3× in <b>{area}</b> within 15 min — farming an easier map for 30 min.",
+                        key=f"deaths{area}", cooldown=3600)
 
     def _next_drop(self) -> str | None:
         """First pickable drop we haven't given up on. A drop that's still on the
@@ -719,7 +843,7 @@ class Automator:
                         continue
                     if probe_due:
                         self._probe_try = now
-                        await self.market_probe()
+                        await self.market_probe(self._probe_items_request())
                         continue
                     # market_due: the town run below does the broker pass
                 elif (area in P.FARM_ZONE_IDS and int(self._inv().get(P.RETURN_SCROLL) or 0) > 0
@@ -805,6 +929,10 @@ class Automator:
         while not self._stop:
             await asyncio.sleep(interval)
             s = self.state.self_
+            try:
+                self._watch_events()
+            except Exception:  # noqa: BLE001
+                log.debug("event watch failed", exc_info=True)
             if s and not built and s.get("stats"):
                 built = True
                 worn = s.get("equipped") or {}
@@ -812,6 +940,15 @@ class Automator:
                          s.get("classId"), s.get("level"), s.get("jobLevel"), s.get("stats"),
                          s.get("skillLevels"),
                          {k: self.state.gear.get(v, {}).get("name", v) for k, v in worn.items()})
+                log.info("SELF keys: %s", {k: (v if not isinstance(v, (dict, list)) or len(str(v)) < 160
+                                               else f"<{type(v).__name__} {len(v)}>")
+                                           for k, v in s.items() if k not in ("inventory", "stats")})
+                inv = {k: v for k, v in self._inv().items() if v}
+                log.info("INVENTORY %d kinds: %s", len(inv), json.dumps(inv, sort_keys=True))
+                log.info("GEAR %d pieces: %s", len(self.state.gear), json.dumps(
+                    [{k: g.get(k) for k in ("id", "name", "slot", "template", "tier", "refine",
+                                            "bonuses", "cards", "locked", "level")}
+                     for g in self.state.gear.values()], default=str))
             if s and time.time() - last_report > 600:
                 last_report = time.time()
                 self.intel.save()
@@ -848,7 +985,10 @@ class Automator:
                 now = time.time()
                 for slot, gid in self.best_gear().items():
                     if worn.get(slot) == gid:
-                        self._equip_tries.pop(gid, None)
+                        if self._equip_tries.pop(gid, None) is not None:
+                            g = self.state.gear.get(gid, {})
+                            self.notify(f"🎒 <b>Upgraded {slot}</b>: {g.get('name')} {g.get('bonuses')}",
+                                        key=f"equip{gid}", cooldown=86400)
                         continue
                     tries, until = self._equip_tries.get(gid, (0, 0))
                     if until > now:
@@ -1132,14 +1272,31 @@ class Automator:
             self.counts["gold_bought"] += qty
             self.counts["gold_silver_spent"] += paid
             log.info("gold: bought %d gold for %d silver (silver now %d)", qty, paid, after)
+            self.notify(f"🥇 <b>Bought {qty} Gold</b> for {paid:,} silver ({best:,}/gold) · "
+                        f"silver left {after:,} · gold now {int(self.state.self_.get('gold') or 0):,}",
+                        key=f"gold{time.time()}", cooldown=0)
         else:
             log.warning("gold: order sent but silver unchanged — exchange refused it")
         return qty
 
     # -------------------------------------------------------- market probe
     def _market_probe_due(self) -> bool:
-        path = os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")
-        return not os.path.exists(path) and time.time() - self._probe_try > 1800
+        data = os.path.dirname(self._BAN_FILE)
+        if os.path.exists(os.path.join(data, "probe_items.txt")):
+            return time.time() - self._probe_try > 120
+        return (not os.path.exists(os.path.join(data, "market_probe.json"))
+                and time.time() - self._probe_try > 1800)
+
+    def _probe_items_request(self) -> list[str] | None:
+        """Items listed one per line in data/probe_items.txt (file is consumed)."""
+        path = os.path.join(os.path.dirname(self._BAN_FILE), "probe_items.txt")
+        try:
+            with open(path, encoding="utf-8-sig") as f:     # -sig: Notepad/PowerShell add a BOM
+                items = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+            os.remove(path)
+            return items or None
+        except OSError:
+            return None
 
     async def market_probe(self, items: list[str] | None = None) -> str:
         """Read-only look at the player market: query a few boards and save
@@ -1162,7 +1319,10 @@ class Automator:
         try:
             for n, item in enumerate(items, 1):
                 before = self.state.market_at
-                await self.client.send(P.market_depth(item, ask=n))
+                if item.startswith("model:"):       # gear price lookup: model rides in the query
+                    await self.client.send(P.market_depth("potion", ask=n, model=item[6:], cat="equipment"))
+                else:
+                    await self.client.send(P.market_depth(item, ask=n))
                 for _ in range(10):
                     await asyncio.sleep(0.5)
                     if self.state.market_at > before:
@@ -1176,7 +1336,9 @@ class Automator:
         out["my_orders"] = list(self.state.market_orders.values())
         out["my_listings"] = list(self.state.market_listings.values())
         out["messages"] = tap[-40:]
-        path = os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")
+        data = os.path.dirname(self._BAN_FILE)
+        first = os.path.join(data, "market_probe.json")
+        path = os.path.join(data, "market_probe2.json") if os.path.exists(first) else first
         with open(path, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=1, default=str)
         got = sum(1 for b in out["boards"].values() if b)

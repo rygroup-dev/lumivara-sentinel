@@ -211,6 +211,9 @@ def is_sellable_loot(item: str) -> bool:
 # ---- per-class gear / skill / stat preferences ----
 # Weapons all sit in the "sword" slot and differ by template (seen in gearRows).
 WEAPON_SLOT = "sword"
+TWO_HANDED = {"bow"}            # bow users wear the quiver in the shield hand
+MAGIC_CLASSES = {"mage", "acolyte", "nekobaku"}
+TIER_LEVEL = [1, 20, 40, 60, 80]   # min level for tier I..V gear
 CLASS_WEAPONS = {
     "archer": ["bow"],
     "swordman": ["blade", "falchion", "sword"],
@@ -383,6 +386,32 @@ LOOT_ITEM_MOB = {
     "griffin_quill": "radiant-griffin", "fallen_halo": "fallen-seraph",
     "sun_core": "sunfire-colossus",
 }
+# Consumables worth more to other players than to us: sell everything above
+# the amount kept for our own use. Market prices (2026-10-09): blue potion
+# ~62, relic box ~1375, concentration potion ~85, fly/butterfly wing ~10-14.
+# EXP/drop scrolls are kept (worth using), throwing blades have no buyers.
+MARKET_SELL_KEEP = {
+    "blue_potion": 20,          # the farm loop doesn't drink SP potions
+    "fly_wing": 10,
+    "butterfly_wing": 15,       # Return Scrolls: we use a few
+    "concentration_potion": 0,
+    "relic_box": 0,
+}
+# Drops worth a Telegram ping (cards are matched by their "_card" suffix).
+RARE_DROPS = {"relic_box", "card_album", "white_potion"}
+
+# Never accepted by the player market (client list), on top of cosmetics.
+UNTRADABLE = {"exp_scroll", "drop_scroll", "break_protection_stone", "gym_pass",
+              "rename_ticket", "megaphone", "skin_voucher"}
+
+# Rough player-market prices (bid side) used before a live board is read.
+MARKET_PRICE_HINT = {
+    "blue_potion": 45, "relic_box": 1000, "concentration_potion": 50, "fly_wing": 11,
+    "butterfly_wing": 11, "refine_stone": 43, "jelly": 25,
+}
+# What the town merchant charges, so we can buy from players when cheaper.
+NPC_BUY_PRICES = {"potion": 10, "butterfly_wing": 30}
+
 # NPC merchant buy-back price for items that aren't monster materials
 NPC_PRICES = {"potion": 2, "orange_potion": 3, "yellow_potion": 4, "white_potion": 5}
 

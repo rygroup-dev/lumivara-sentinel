@@ -11,13 +11,22 @@ import html
 import logging
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from . import protocol as P
@@ -53,9 +62,8 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
             f"<b>🎮 {html.escape(str(s['name']))}</b>  ·  {conn}\n"
             f"Lv <b>{s['level']}</b> (job {s.get('jobLevel', '?')}) · {html.escape(str(s['classId']))} · 📍{html.escape(str(s['area']))}\n"
             f"❤️ {hp}  ({s['hp_pct']}%)   💧 {sp}\n"
-            f"🪙 Silver: <b>{s['silver']}</b>   🎯 Points: <b>{s['points']}</b>   ☠️ Kills: {s.get('kills', 0)}\n"
+            f"🪙 Silver <b>{int(s['silver'] or 0):,}</b>   🥇 Gold <b>{int(st.self_.get('gold') or 0):,}</b>   ☠️ Kills {int(s.get('kills') or 0):,}\n"
             f"📊 {stat_line}\n"
-            f"👾 mobs: {s['mobs_alive']}   💎 drops: {s['drops']}   🌐 online: {s['online']}\n"
         )
 
     # quest status line
@@ -77,49 +85,42 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
         zone = au.desired_zone()
         zname = next((z[1] for z in P.FARM_ZONES if z[0] == zone), zone)
         pots = au.hp_potion_stock()
+        pinned = " (pinned)" if orch.cfg.farm_zone in P.FARM_ZONE_IDS else ""
         farm_line = (
-            f"🗺 Target map: <b>{html.escape(zname)}</b>"
-            f"{' · 😴 resting' if au._resting else ''}\n"
-            f"🧪 HP potions: <b>{pots if pots is not None else '?'}</b>   "
-            f"🏹 arrows: {au._inv().get(P.ARROW_ENTRY, 0)}\n"
-            f"🛒 this session: sold +{au.counts.get('sold_silver', 0)} silver · "
-            f"bought {au.counts.get('potions_bought', 0)} potions · deaths {au.counts['revive']}\n"
+            f"\n<b>🌾 Farming</b>\n"
+            f"🗺 {html.escape(zname)}{pinned}{' · 😴 resting' if au._resting else ''}"
+            f"{' · ' + html.escape(au._zone_pick[1]) if au._zone_pick and not pinned else ''}\n"
+            f"🧪 potions <b>{pots if pots is not None else '?'}</b> · "
+            f"🏹 arrows {int(au._inv().get(P.ARROW_ENTRY, 0) or 0):,} · deaths {au.counts['revive']}\n"
         )
+        farm_line += "\n<b>💰 Economy</b> (this session)\n"
         if orch.cfg.enable_market:
             tc = au.trader.counts
             open_sells = sum(1 for o in au.trader.my_orders() if o.get("side") == "sell")
             farm_line += (
-                f"⚖️ Market: sold now +{tc['instant_silver']:,} · listed {tc['listed']} pcs "
-                f"(~{tc['listed_value']:,} silver) · {open_sells} open · "
-                f"cheap potions {tc['bought_potions']}\n"
-                f"🛡 Gear on market: {len(au.trader.listed_gear_ids())}/{orch.cfg.market_gear_slots} · "
-                f"listed this session {tc['gear_listed']} (~{tc['gear_listed_value']:,} silver) · "
-                f"spare left {len(au.spare_gear())}\n"
+                f"⚖️ sold now +{tc['instant_silver']:,} · filled ~{tc['filled_value']:,} · "
+                f"{open_sells} item orders open\n"
+                f"🛡 gear on market {len(au.trader.listed_gear_ids())}/{orch.cfg.market_gear_slots} · "
+                f"spare {len(au.spare_gear())} · upgrades spent {au._gear_spent:,}/{orch.cfg.gear_daily_budget:,}\n"
             )
-        if orch.cfg.gold_autobuy or au.counts.get("gold_bought"):
-            price = au.last_gold_price
-            farm_line += (
-                f"🥇 Gold <b>{int(st.self_.get('gold') or 0):,}</b> · auto-buy "
-                f"{'🟢 ON' if orch.cfg.gold_autobuy else '⚪ OFF'} · "
-                f"bought {au.counts.get('gold_bought', 0)} gold for "
-                f"{au.counts.get('gold_silver_spent', 0):,} silver · "
-                f"price {f'{price:,}' if price else '?'} · keeps {orch.cfg.gold_reserve:,}\n"
-            )
-        pick = au._zone_pick
+        else:
+            farm_line += "⚖️ market OFF (ENABLE_MARKET=false)\n"
+        price = au.last_gold_price
+        farm_line += (
+            f"🥇 auto-buy {'ON' if orch.cfg.gold_autobuy else 'OFF'} · bought "
+            f"{au.counts.get('gold_bought', 0)} for {au.counts.get('gold_silver_spent', 0):,} · "
+            f"price {f'{price:,}' if price else '?'} · keeps {orch.cfg.gold_reserve:,}\n"
+        )
         intel = au.intel.summary_lines(st.self_.get("area"))
-        if pick or intel:
-            farm_line += f"\n<b>📈 Farm intel</b>{' · ' + html.escape(pick[1]) if pick else ''}\n"
-            farm_line += "".join(f"<code>{html.escape(l)}</code>\n" for l in intel[:6])
+        if intel:
+            farm_line += "\n<b>📈 Maps</b>\n" + "".join(
+                f"<code>{html.escape(l)}</code>\n" for l in intel[:5])
 
     text = (
         body
         + farm_line
         + qline
-        + "\n<b>Automation</b>\n"
-        + f"🌾 Farm {_on(a['farm'])}   📜 Quest {_on(a['quest'])}   💀 Revive {_on(a['revive'])}\n"
-        + f"📊 Stats {_on(a['stats'])}   🎒 Equip {_on(a['equip'])}   ✨ Skills {_on(a['skills'])}\n"
-        + f"🏪 Town shopping {'🟢 ON' if orch.cfg.enable_sell else '⚪ OFF (ENABLE_SELL)'}\n"
-        + f"<i>updated {time.strftime('%H:%M:%S')}</i>"
+        + f"\n<i>updated {time.strftime('%H:%M')}</i>"
     )
 
     kb = [
@@ -139,19 +140,17 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton(f"✨ Skills {_on(a['skills'])}", callback_data="skills"),
         ],
         [
-            InlineKeyboardButton("🗺 Travel", callback_data="menu:travel"),
+            InlineKeyboardButton("⚖️ Market", callback_data="menu:market"),
+            InlineKeyboardButton("🥇 Gold", callback_data="menu:gold"),
             InlineKeyboardButton("🎒 Gear", callback_data="menu:equip"),
-            InlineKeyboardButton("🏪 Town run", callback_data="townrun"),
         ],
         [
-            InlineKeyboardButton("💰 Gold Market", callback_data="menu:gold"),
-            InlineKeyboardButton("⚖️ Market now", callback_data="marketnow"),
+            InlineKeyboardButton("🗺 Travel", callback_data="menu:travel"),
+            InlineKeyboardButton("🏪 Town run", callback_data="townrun"),
             InlineKeyboardButton("❤️ Heal now", callback_data="heal"),
         ],
         [
             InlineKeyboardButton("🎁 Claim all", callback_data="claimall"),
-        ],
-        [
             InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings"),
             InlineKeyboardButton("🧾 WS Log", callback_data="menu:wslog"),
         ],
@@ -199,6 +198,40 @@ def _equip_menu(orch) -> tuple[str, InlineKeyboardMarkup]:
     return txt, InlineKeyboardMarkup(kb)
 
 
+def _market_text(orch) -> str:
+    au = orch.automator
+    tr = au.trader
+    c = orch.cfg
+    if not c.enable_market:
+        return ("<b>⚖️ Player market</b>\n\n<i>Off — set ENABLE_MARKET=true in .env and restart.</i>")
+    tc = tr.counts
+    orders = [o for o in tr.my_orders() if int(o.get("quantity") or 0) > 0]
+    lines = ["<b>⚖️ Player market</b> (at the town broker)\n"]
+    lines.append(f"Sold instantly: <b>+{tc['instant_silver']:,}</b> silver · listings filled ~{tc['filled_value']:,}")
+    lines.append(f"Listed: {tc['listed']} items (~{tc['listed_value']:,}) · gear {tc['gear_listed']} "
+                 f"(~{tc['gear_listed_value']:,}) · cheap potions bought {tc['bought_potions']}")
+    last = time.strftime("%H:%M", time.localtime(tr.last_pass)) if tr.last_pass else "never"
+    lines.append(f"Last broker visit: {last} · next when ≥150 silver to sell, every {c.market_every_min} min")
+    lines.append(f"\n<b>My item orders ({len(orders)})</b>")
+    for o in orders[:12]:
+        lines.append(f"• {html.escape(str(o.get('item')))} {o.get('quantity')}/{o.get('initialQuantity')} "
+                     f"@{int(o.get('price') or 0):,}")
+    if len(orders) > 12:
+        lines.append(f"… and {len(orders) - 12} more")
+    lines.append(f"\n<b>Gear</b>: {len(tr.listed_gear_ids())}/{c.market_gear_slots} on market · "
+                 f"{len(au.spare_gear())} spare to sell · salvaged {tc['salvaged']} unsold → fragments")
+    lines.append(f"<i>Unsold gear is re-listed every {2 * c.market_reprice_hours:g}h; after "
+                 f"{P.GEAR_RELISTS_BEFORE_SALVAGE} tries it is dismantled into fragments (sold here too). "
+                 f"Nothing is ever destroyed.</i>")
+    lines.append(f"Upgrades: {'ON' if c.market_buy_gear else 'OFF'} · spent today "
+                 f"{au._gear_spent:,}/{c.gear_daily_budget:,} · max {c.gear_max_price:,}/piece")
+    if tr.prices:
+        lines.append("\n<b>Last prices seen</b> (bid / ask / avg)")
+        for item, p in sorted(tr.prices.items(), key=lambda kv: -kv[1].get("at", 0))[:8]:
+            lines.append(f"• {html.escape(item)}: {p['bid']:,} / {p['ask']:,} / {p['avg']:,.0f}")
+    return "\n".join(lines)
+
+
 def _gold_text(orch) -> str:
     gm = orch.state.gold_market or {}
     depth = gm.get("depth") or {}
@@ -211,19 +244,24 @@ def _gold_text(orch) -> str:
     age = time.time() - orch.state.gold_market_at if orch.state.gold_market_at else None
     lines = [
         "<b>💰 Gold Exchange</b> (price = Silver per 1 Gold)\n",
-        f"Best ask (buy Gold at): <b>{best_ask if best_ask else '—'}</b>",
-        f"Best bid (sell Gold at): <b>{best_bid if best_bid else '—'}</b>",
+        f"Best ask (buy Gold at): <b>{f'{best_ask:,}' if best_ask else '—'}</b>",
+        f"Best bid (sell Gold at): <b>{f'{best_bid:,}' if best_bid else '—'}</b>",
         f"Your silver: <b>{silver:,}</b>" + (f" · gold: {gold}" if gold is not None else ""),
     ]
     price = best_ask or best_bid
+    c = orch.cfg
+    au = orch.automator
     if price:
-        can = silver // price
+        spare = max(0, silver - c.gold_reserve)
         lines += [
-            f"\nYour silver buys ≈ <b>{can}</b> Gold now.",
+            f"\nSpare silver (above {c.gold_reserve:,} reserve) buys ≈ <b>{spare // price}</b> Gold now.",
             f"Premium 30 days = 2,500 Gold ≈ <b>{2500 * price:,}</b> silver.",
         ]
+    lines.append(
+        f"\n<b>Auto-buy</b> {'🟢 ON' if c.gold_autobuy else '⚪ OFF'} · every 10 min · "
+        f"max {c.gold_max_price:,}/gold · bought {au.counts.get('gold_bought', 0)} "
+        f"for {au.counts.get('gold_silver_spent', 0):,} silver this session")
     lines.append(f"\n<i>{'updated %ds ago' % age if age is not None else 'no data yet — press Refresh'}</i>")
-    lines.append("<i>Orders are placed manually in-game; the bot only reads the market.</i>")
     return "\n".join(lines)
 
 
@@ -240,9 +278,13 @@ def _settings_text(orch) -> str:
         + "\n"
         f"Potion HP%: {c.potion_hp_percent}\n"
         f"Farm map: {c.farm_zone} (margin {c.zone_margin} levels)\n"
-        f"Town shopping: {c.enable_sell} · potion target {c.potion_target} · "
+        f"Farm goal: {c.farm_goal}\n"
+        f"Town shopping: {c.enable_sell} · potion target {c.potion_target} · keep {c.potion_keep} · "
         f"budget {c.potion_budget_pct}% of silver · arrows min {c.arrow_min}\n"
-        f"Gold market orders: manual in-game (bot reads prices)\n\n"
+        f"Market: {c.enable_market} · cards {c.market_sell_cards} · gear sell {c.market_sell_gear} "
+        f"({c.market_gear_slots} slots) · reprice {c.market_reprice_hours}h · every {c.market_every_min} min\n"
+        f"Gear upgrades: {c.market_buy_gear} · {c.gear_daily_budget:,}/day · max {c.gear_max_price:,}/piece\n"
+        f"Gold auto-buy: {c.gold_autobuy} · reserve {c.gold_reserve:,} · max {c.gold_max_price:,}/gold\n\n"
         "<i>Edit .env and restart to change these.</i>"
     )
 
@@ -266,6 +308,26 @@ def _wslog_text(orch) -> str:
     )
 
 
+async def _edit(q, text: str, kb: InlineKeyboardMarkup) -> None:
+    """Edit a menu message; pressing Refresh on an unchanged view is not an error."""
+    try:
+        await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            raise
+
+
+MENU_BUTTON = "📋 Menu"
+MENU_KEYBOARD = ReplyKeyboardMarkup([[KeyboardButton(MENU_BUTTON)]], resize_keyboard=True,
+                                    is_persistent=True)
+COMMANDS = [
+    BotCommand("menu", "Open the dashboard"),
+    BotCommand("status", "Same as /menu"),
+    BotCommand("market", "Player market: orders, gear, prices"),
+    BotCommand("gold", "Gold exchange and auto-buy"),
+]
+
+
 class LumivaraTelegram:
     def __init__(self, orch) -> None:
         self.orch = orch
@@ -276,7 +338,44 @@ class LumivaraTelegram:
         app.bot_data["orch"] = self.orch
         app.bot_data["tg"] = self
         app.add_handler(CommandHandler(["start", "menu", "status"], self.cmd_menu))
+        app.add_handler(CommandHandler("market", self.cmd_market))
+        app.add_handler(CommandHandler("gold", self.cmd_gold))
+        app.add_handler(MessageHandler(filters.Text([MENU_BUTTON]), self.cmd_menu))
         app.add_handler(CallbackQueryHandler(self.on_callback))
+
+    async def setup_commands(self) -> None:
+        """Command list shown in Telegram's ☰ menu next to the chat box."""
+        try:
+            await self.app.bot.set_my_commands(COMMANDS)
+        except Exception:  # noqa: BLE001
+            log.debug("set_my_commands failed", exc_info=True)
+
+    async def _send_view(self, update: Update, text: str, kb: InlineKeyboardMarkup,
+                         context: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = await update.effective_message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+        context.bot_data["dash"] = {"chat_id": msg.chat_id, "message_id": msg.message_id,
+                                    "last": None, "view": "sub"}
+
+    async def cmd_market(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update):
+            return
+        await self._send_view(update, _market_text(self.orch), InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚖️ Sell now", callback_data="market:sell"),
+             InlineKeyboardButton("🛡 Shop gear now", callback_data="market:gear")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="market:refresh"),
+             InlineKeyboardButton("⬅️ Dashboard", callback_data="refresh")],
+        ]), context)
+
+    async def cmd_gold(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update):
+            return
+        await self.orch.client.send(P.gold_watch())
+        await asyncio.sleep(1.5)
+        await self._send_view(update, _gold_text(self.orch), InlineKeyboardMarkup([
+            [InlineKeyboardButton("🥇 Buy gold now", callback_data="gold:buy"),
+             InlineKeyboardButton("🔄 Refresh", callback_data="gold:refresh")],
+            [InlineKeyboardButton("⬅️ Dashboard", callback_data="gold:close")],
+        ]), context)
 
     # ------------------------------------------------------------- guards
     def _is_owner(self, update: Update) -> bool:
@@ -288,6 +387,12 @@ class LumivaraTelegram:
         if not self._is_owner(update):
             await update.effective_message.reply_text("⛔ Not authorized.")
             return
+        if not context.bot_data.get("menu_kb_sent"):
+            # one-time: put a permanent "📋 Menu" button under the chat box
+            await update.effective_message.reply_text(
+                "Tap <b>📋 Menu</b> below any time to open the dashboard.",
+                reply_markup=MENU_KEYBOARD, parse_mode="HTML")
+            context.bot_data["menu_kb_sent"] = True
         text, kb = render_dashboard(self.orch)
         msg = await update.effective_message.reply_text(text, reply_markup=kb, parse_mode="HTML")
         context.bot_data["dash"] = {
@@ -335,14 +440,21 @@ class LumivaraTelegram:
                 for m in (P.claim_quest(), P.claim_daily(), P.mail_claim(), P.claim_hunt()):
                     await orch.client.send(m)
                 note = "Claimed quest/daily/mail/hunt"
-            elif data == "marketnow":
+            elif data in ("marketnow", "market:sell", "market:gear"):
                 au = orch.automator
                 if not orch.cfg.enable_market:
                     note = "Market is off (ENABLE_MARKET=false in .env)"
                 else:
-                    au.market_requested = True   # farm loop goes to the broker (Return Scroll if needed)
+                    if data == "market:gear":
+                        au._last_gear_shop = 0.0     # allow the 3-hourly upgrade check now
+                    au.market_requested = True       # farm loop goes to the broker (Return Scroll if needed)
                     au._last_town_run = 0.0
-                    note = "Going to the market broker"
+                    note = ("Going to the broker to shop for gear upgrades" if data == "market:gear"
+                            else "Going to the market broker")
+            elif data == "gold:buy":
+                au = orch.automator
+                n = await au.buy_gold()
+                note = f"Ordered {n} Gold" if n else "Not enough spare silver / price above max"
             elif data == "townrun":
                 au = orch.automator
                 au._last_town_run = 0.0  # allow a shopping run right away
@@ -370,9 +482,12 @@ class LumivaraTelegram:
                     orch.cfg.farm_zone = "auto"
                     note = "Map: auto by level"
                 else:
-                    orch.cfg.farm_zone = zid  # pin until set back to auto
-                    await orch.automator.travel(zid)
-                    note = f"Travelling to {zid} (pinned)"
+                    # pin it; the farm loop walks there through the portals
+                    # (a bare travel request is ignored away from the portal)
+                    orch.cfg.farm_zone = zid
+                    orch.automator._zone_pick = None
+                    orch.automator._last_travel = 0.0
+                    note = f"Heading to {zid} (pinned — pick Auto to undo)"
             # ----- menu navigation (edit in place) -----
             elif data == "menu:travel":
                 await q.answer()
@@ -390,14 +505,21 @@ class LumivaraTelegram:
                 await q.answer("Reading market…")
                 await orch.client.send(P.gold_watch())
                 await asyncio.sleep(1.5)
-                await q.edit_message_text(
-                    _gold_text(orch),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Refresh", callback_data="gold:refresh")],
-                        [InlineKeyboardButton("⬅️ Back", callback_data="gold:close")],
-                    ]),
-                    parse_mode="HTML",
-                )
+                await _edit(q, _gold_text(orch), InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🥇 Buy gold now", callback_data="gold:buy"),
+                     InlineKeyboardButton("🔄 Refresh", callback_data="gold:refresh")],
+                    [InlineKeyboardButton("⬅️ Back", callback_data="gold:close")],
+                ]))
+                mark_sub()
+                return
+            elif data in ("menu:market", "market:refresh"):
+                await q.answer()
+                await _edit(q, _market_text(orch), InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚖️ Sell now", callback_data="market:sell"),
+                     InlineKeyboardButton("🛡 Shop gear now", callback_data="market:gear")],
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="market:refresh"),
+                     InlineKeyboardButton("⬅️ Back", callback_data="refresh")],
+                ]))
                 mark_sub()
                 return
             elif data == "gold:close":

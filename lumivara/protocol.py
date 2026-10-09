@@ -165,6 +165,19 @@ def market_cancel_order(order_id: str) -> dict:
     return {"type": "marketCancelOrder", "orderId": order_id}
 
 
+def market_buy_listing(listing_id: str) -> dict:
+    return {"type": "marketBuyListing", "listingId": listing_id}
+
+
+# Market filter for each worn slot: (cat, part). Weapons are filtered by job.
+SLOT_MARKET_QUERY = {
+    "sword": ("weapon", None), "armor": ("armor", "armor"), "head": ("armor", "head"),
+    "face": ("armor", "face"), "mouth": ("armor", "mouth"), "garment": ("armor", "garment"),
+    "shoes": ("armor", "shoes"), "accessory1": ("accessory", None), "accessory2": ("accessory", None),
+    "shield": ("other", None),     # bow users: the quiver ("ammo") is listed under "other"
+}
+
+
 def market_cancel_listing(listing_id: str) -> dict:
     return {"type": "marketCancelListing", "listingId": listing_id}
 
@@ -401,6 +414,15 @@ MARKET_SELL_KEEP = {
     "concentration_potion": 0,
     "relic_box": 0,
 }
+# Salvage fragments from dismantled gear (~40-90 silver each on the market).
+FRAGMENTS = [f"{k}_fragment_{t}" for k in ("weapon", "equipment") for t in range(1, 6)]
+MARKET_SELL_KEEP.update({f: 0 for f in FRAGMENTS})
+GEAR_RELISTS_BEFORE_SALVAGE = 2   # unsold this many times -> dismantle into fragments
+
+
+def dismantle(gear_ids: list[str]) -> dict:
+    """Salvage gear into fragments (client: up to a batch per message)."""
+    return {"type": "dismantle", "gearIds": list(gear_ids)}
 # Drops worth a Telegram ping (cards are matched by their "_card" suffix).
 RARE_DROPS = {"relic_box", "card_album", "white_potion"}
 
@@ -412,6 +434,7 @@ UNTRADABLE = {"exp_scroll", "drop_scroll", "break_protection_stone", "gym_pass",
 MARKET_PRICE_HINT = {
     "blue_potion": 45, "relic_box": 1000, "concentration_potion": 50, "fly_wing": 11,
     "butterfly_wing": 11, "refine_stone": 43, "jelly": 25,
+    **{f: 40 for f in FRAGMENTS},
 }
 # What the town merchant charges, so we can buy from players when cheaper.
 NPC_BUY_PRICES = {"potion": 10, "butterfly_wing": 30}

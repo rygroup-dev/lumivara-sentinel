@@ -74,6 +74,9 @@ class Config:
     market_sell_cards: bool = True
     market_sell_gear: bool = True     # list gear we won't wear (other class / worse)
     market_gear_slots: int = 20       # gear listings allowed at once (40 with premium)
+    market_buy_gear: bool = True      # buy clear gear upgrades from players
+    gear_daily_budget: int = 5000     # silver per day for gear upgrades
+    gear_max_price: int = 2500        # never pay more than this for one piece
     market_reprice_hours: float = 6.0
     market_every_min: int = 45    # town trip to the broker at most this often
 
@@ -113,6 +116,9 @@ class Config:
             market_sell_cards=_b("MARKET_SELL_CARDS", True),
             market_sell_gear=_b("MARKET_SELL_GEAR", True),
             market_gear_slots=_i("MARKET_GEAR_SLOTS", 20),
+            market_buy_gear=_b("MARKET_BUY_GEAR", True),
+            gear_daily_budget=_i("GEAR_DAILY_BUDGET", 5000),
+            gear_max_price=_i("GEAR_MAX_PRICE", 2500),
             market_reprice_hours=_f("MARKET_REPRICE_HOURS", 6.0),
             market_every_min=_i("MARKET_EVERY_MIN", 45),
             gold_autobuy=_b("GOLD_AUTOBUY", False),

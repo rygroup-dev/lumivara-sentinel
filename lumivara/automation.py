@@ -89,6 +89,9 @@ class Automator:
         self._respec_try = 0.0
         self._travel_fail: dict[str, int] = {}
         self._good_detour: dict[tuple, tuple[float, float]] = {}
+        self._last_gear_shop = 0.0
+        self._gear_spent_day = ""
+        self._gear_spent = 0
         self._probe_try = 0.0
         self.market_requested = False
         self.notify_cb = None             # async (text) -> None, set by the app (Telegram)
@@ -348,6 +351,84 @@ class Automator:
                 best[slot] = (score, gid)
         return {slot: gid for slot, (_s, gid) in best.items()}
 
+    # ------------------------------------------------- gear from the market
+    def _gear_budget_left(self) -> int:
+        day = time.strftime("%Y-%m-%d")
+        if self._gear_spent_day != day:
+            self._gear_spent_day, self._gear_spent = day, 0
+        silver = int(self.state.self_.get("silver") or 0)
+        spare = max(0, silver - self.cfg.gold_reserve)
+        return int(min(self.cfg.gear_daily_budget - self._gear_spent, spare * 0.5))
+
+    async def buy_gear_upgrades(self) -> list[str]:
+        """At the broker: for each slot we wear, look at players' listings of
+        the best tier our level allows (then one below) and buy the piece that
+        adds the most per silver — only clear upgrades (>=15% better), within
+        GEAR_DAILY_BUDGET and GEAR_MAX_PRICE, so silver keeps flowing to gold."""
+        if not self.cfg.market_buy_gear or time.time() - self._last_gear_shop < 3 * 3600:
+            return []
+        self._last_gear_shop = time.time()
+        s = self.state.self_
+        lvl = int(s.get("level") or 1)
+        top_tier = max(t for t in range(1, 6) if P.TIER_LEVEL[t - 1] <= lvl)
+        cls = s.get("classId")
+        allowed = P.CLASS_WEAPONS.get(cls) or []
+        worn = s.get("equipped") or {}
+        bow = self._weapon_template() in P.TWO_HANDED
+        bought: list[str] = []
+        for slot, (cat, part) in P.SLOT_MARKET_QUERY.items():
+            budget = self._gear_budget_left()
+            if budget < 100:
+                break
+            if slot == "shield" and not bow:
+                continue        # shield-hand gear for other weapons isn't handled here
+            cur = self.state.gear.get(worn.get(slot)) if worn.get(slot) else None
+            cur_v = self.gear_value(cur) if cur else 0.0
+            pick = None
+            for tier in (top_tier, top_tier - 1):
+                if tier < 1 or (cur and int(cur.get("tier") or 1) > tier):
+                    continue
+                q = {"cat": cat, "tier": tier, "job": cls}
+                if part:
+                    q["part"] = part
+                rows = await self.trader.browse_gear(**q)
+                for r in rows or []:
+                    g = r["gear"]
+                    if (self.worn_slot(g) != slot or not self.gear_level_ok(g)
+                            or (slot == P.WEAPON_SLOT and g.get("template") not in allowed)):
+                        continue
+                    gain = self.gear_value(g) - cur_v
+                    price = int(r["price"])
+                    if (gain < max(1.0, cur_v * 0.15) or price > self.cfg.gear_max_price
+                            or price > budget):
+                        continue
+                    if not pick or gain / price > pick[0]:
+                        pick = (gain / price, r, gain)
+                await asyncio.sleep(0.5)
+                if pick:
+                    break
+            if not pick:
+                continue
+            _ratio, r, gain = pick
+            g = r["gear"]
+            if await self.trader.buy_listing(r):
+                self._gear_spent += int(r["price"])
+                line = f"{slot}: {g.get('name')} {g.get('bonuses')} for {r['price']:,} (+{gain:.0f} score)"
+                bought.append(line)
+                log.info("gear upgrade bought — %s", line)
+            else:
+                log.info("gear upgrade: couldn't buy %s (%s)", g.get("name"), r["price"])
+            await asyncio.sleep(0.8)
+        if len(bought) >= 2:
+            # noticeably stronger now: re-test the maps (higher ones pay more loot)
+            self._forget_old_build()
+            log.info("gear upgraded in %d slots — map results reset for re-testing", len(bought))
+        if bought:
+            self.notify("🛡 <b>Gear upgrades bought</b>\n" + "\n".join(bought) +
+                        f"\nspent today {self._gear_spent:,}/{self.cfg.gear_daily_budget:,} silver",
+                        key=f"gearbuy{time.time()}", cooldown=0)
+        return bought
+
     def _preset_gear_ids(self) -> set[str]:
         """Gear on us or saved in any outfit preset (`wearing`, other classes'
         `classEquipped`): the market refuses to list those."""
@@ -378,7 +459,7 @@ class Automator:
         on_market = self.trader.listed_gear_ids()
         for gid, g in self.state.gear.items():
             if (gid in worn_ids or gid in best.values() or gid in on_market
-                    or g.get("locked") or g.get("cards")):
+                    or g.get("locked") or g.get("cards") or g.get("mall") or g.get("gift")):
                 continue
             slot = self.worn_slot(g)
             other_class = (g.get("slot") == P.WEAPON_SLOT and allowed
@@ -460,6 +541,8 @@ class Automator:
                                                 silver * self.cfg.potion_budget_pct // 100)
                     if int(inv.get(P.RETURN_SCROLL) or 0) < 3:
                         await self.trader.buy_cheap(P.RETURN_SCROLL, 10, 300)
+                    await self.buy_gear_upgrades()
+                    await self.client.send(P.market_close())
                 except Exception:  # noqa: BLE001 — market trouble must not stop farming
                     log.exception("market pass failed")
             else:
@@ -866,7 +949,7 @@ class Automator:
                         continue
                     if probe_due:
                         self._probe_try = now
-                        await self.market_probe(self._probe_items_request())
+                        await self._run_requested_probe()
                         continue
                     # market_due: the town run below does the broker pass
                 elif (area in P.FARM_ZONE_IDS and int(self._inv().get(P.RETURN_SCROLL) or 0) > 0
@@ -972,8 +1055,12 @@ class Automator:
                 for g in self.state.gear.values():
                     k = f"{g.get('slot')}/T{g.get('tier') or 0}"
                     by[k] = by.get(k, 0) + 1
+                spare = self.spare_gear()
                 log.info("GEAR %d pieces (%d spare): %s", len(self.state.gear),
-                         len(self.spare_gear()), json.dumps(dict(sorted(by.items()))))
+                         len(spare), json.dumps(dict(sorted(by.items()))))
+                worn = s.get("equipped") or {}
+                log.info("WORN %s", {k: self.state.gear.get(v, {}).get("name", v) for k, v in worn.items()})
+                log.info("SPARE (first 15): %s", [f"{g.get('name')}#{g['id'][:4]}" for g in spare[:15]])
             if s and time.time() - last_report > 600:
                 last_report = time.time()
                 self.intel.save()
@@ -1313,15 +1400,28 @@ class Automator:
                 and time.time() - self._probe_try > 1800)
 
     def _probe_items_request(self) -> list[str] | None:
-        """Items listed one per line in data/probe_items.txt (file is consumed)."""
+        """Items listed one per line in data/probe_items.txt (removed once the
+        probe has actually run)."""
         path = os.path.join(os.path.dirname(self._BAN_FILE), "probe_items.txt")
         try:
             with open(path, encoding="utf-8-sig") as f:     # -sig: Notepad/PowerShell add a BOM
                 items = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
-            os.remove(path)
             return items or None
         except OSError:
             return None
+
+    async def _run_requested_probe(self) -> None:
+        path = os.path.join(os.path.dirname(self._BAN_FILE), "probe_items.txt")
+        try:
+            done = await self.market_probe(self._probe_items_request())
+        except Exception:  # noqa: BLE001
+            log.exception("market probe failed")
+            done = ""
+        if done:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     async def market_probe(self, items: list[str] | None = None) -> str:
         """Read-only look at the player market: query a few boards and save
@@ -1346,6 +1446,8 @@ class Automator:
                 before = self.state.market_at
                 if item.startswith("model:"):       # gear price lookup: model rides in the query
                     await self.client.send(P.market_depth("potion", ask=n, model=item[6:], cat="equipment"))
+                elif item.startswith("{"):          # raw query, e.g. {"cat":"weapon","tier":3}
+                    await self.client.send(P.market_depth("potion", ask=n, **json.loads(item)))
                 else:
                     await self.client.send(P.market_depth(item, ask=n))
                 for _ in range(10):
@@ -1358,8 +1460,8 @@ class Automator:
             await asyncio.sleep(1)
         finally:
             self.state.raw_tap = None
-        out["my_orders"] = list(self.state.market_orders.values())
-        out["my_listings"] = list(self.state.market_listings.values())
+        out["my_orders"] = list(self.state.market_orders.values())[:30]
+        out["listings"] = list(self.state.market_listings.values())[:60]
         out["messages"] = tap[-40:]
         data = os.path.dirname(self._BAN_FILE)
         first = os.path.join(data, "market_probe.json")

@@ -18,8 +18,10 @@ re-listed at the current price on the next pass.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import os
 import time
 
 from . import protocol as P
@@ -38,9 +40,18 @@ class Trader:
         self.prices: dict[str, dict] = {}     # item -> last analysed board
         self.last_pass = 0.0
         self.counts = {"instant_silver": 0, "listed": 0, "listed_value": 0, "bought_potions": 0,
-                       "filled_value": 0, "gear_listed": 0, "gear_listed_value": 0}
+                       "filled_value": 0, "gear_listed": 0, "gear_listed_value": 0, "salvaged": 0}
+        # how often each piece of gear came back unsold (survives restarts)
+        self._relist_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                         "data", "gear_relists.json")
+        try:
+            with open(self._relist_file, encoding="utf-8") as f:
+                self.relists: dict[str, int] = {k: int(v) for k, v in json.load(f).items()}
+        except (OSError, ValueError):
+            self.relists = {}
         self.gear_prices: dict[str, dict] = {}
         self._listed_now: set[str] = set()    # gear ids we listed this session
+        self._refused_gear: set[str] = set()  # gear the market wouldn't take this session
         self.spare_gear = lambda: []          # replaced by Automator.spare_gear
         self._ask = 100
         self.notify = lambda *a, **k: None    # replaced by Automator.notify
@@ -161,7 +172,11 @@ class Trader:
             created = created / 1000 if created > 1e11 else created
             if x.get("id") and created and created < gear_cutoff:
                 await self.client.send(P.market_cancel_listing(x["id"]))
-                self._listed_now.discard((x.get("gear") or {}).get("id"))
+                gid = (x.get("gear") or {}).get("id")
+                self._listed_now.discard(gid)
+                if gid:
+                    self.relists[gid] = self.relists.get(gid, 0) + 1   # came back unsold
+                    self._save_relists()
                 n += 1
                 await asyncio.sleep(0.8)
         if n:
@@ -324,6 +339,36 @@ class Trader:
                 return info
         return None
 
+    async def browse_gear(self, **query) -> list[dict] | None:
+        """Other players' gear listings matching a market filter
+        (cat / part / tier / job), cheapest first. Each new query resets the
+        listing rows, so they're read right after the answer."""
+        self._ask += 1
+        ask = self._ask
+        await self.client.send(P.market_depth(P.POTION_BUY_ENTRY, ask=ask, size=40, **query))
+        for _ in range(12):
+            await asyncio.sleep(0.4)
+            if (self.state.market.get("board") or {}).get("ask") == ask:
+                break
+        else:
+            return None
+        await asyncio.sleep(0.6)        # listing rows follow the board
+        me = self.state.self_.get("id")
+        rows = [r for r in self.state.market_listings.values()
+                if r.get("playerId") != me and isinstance(r.get("gear"), dict) and r.get("price")]
+        return sorted(rows, key=lambda r: r["price"])
+
+    async def buy_listing(self, row: dict) -> bool:
+        """Buy one gear listing; True once the piece is in our bag."""
+        gid = (row.get("gear") or {}).get("id")
+        silver0 = int(self.state.self_.get("silver") or 0)
+        await self.client.send(P.market_buy_listing(row["id"]))
+        for _ in range(8):
+            await asyncio.sleep(0.5)
+            if gid in self.state.gear or int(self.state.self_.get("silver") or 0) < silver0:
+                return True
+        return False
+
     def my_listings(self) -> list[dict]:
         me = self.state.self_.get("id")
         return [x for x in self.state.market_listings.values() if me and x.get("playerId") == me]
@@ -340,20 +385,32 @@ class Trader:
         but never below half the board average."""
         if not self.cfg.market_sell_gear or not spare:
             return []
+        # our listing rows only arrive with a board answer: make sure we have one,
+        # otherwise a full listing cap looks empty and every listing is refused
+        await self.board(P.POTION_BUY_ENTRY)
         on_market = self.listed_gear_ids()
+        log.info("market: %d/%d gear listings in use", len(on_market), self.cfg.market_gear_slots)
         free = self.cfg.market_gear_slots - len(on_market)
         listed: list[str] = []
+        salvage: list[dict] = []
         refused = 0
         for g in spare:
-            if free <= 0 or refused >= 2:      # cap reached (or the server keeps saying no)
-                break
             gid = g["id"]
-            if gid in on_market:
+            if gid in on_market or gid in self._refused_gear:
+                continue
+            if self.relists.get(gid, 0) >= P.GEAR_RELISTS_BEFORE_SALVAGE:
+                salvage.append(g)       # nobody wants it at market price: take the fragments
+                continue
+            if free <= 0 or refused >= 4:      # cap reached (or the server keeps saying no)
                 continue
             model = self.gear_model(g)
             p = await self.gear_price(model)
-            if not p or not p["count"] or not p["low"]:
-                continue        # nobody sells this model: no price to go by
+            if p is not None and not p["count"]:
+                if int(g.get("tier") or 0) <= 2:
+                    salvage.append(g)   # common low-tier piece nobody lists: take the fragments
+                continue                # higher tiers with no listings may be rare: keep them
+            if not p or not p["low"]:
+                continue
             price = max(p["low"] - 1, int(p["avg"] * 0.5), 1)
             silver0 = int(self.state.self_.get("silver") or 0)
             await self.client.send(P.market_list_gear(gid, price))
@@ -368,9 +425,39 @@ class Trader:
                 self.counts["gear_listed_value"] += int(P.market_net(price))
                 listed.append(f"{g.get('name')}@{price}")
             else:
+                # usually already listed (from before a restart) or in a preset:
+                # don't retry it this session, move on to the next piece
                 refused += 1
-                log.info("market: gear %s (%s) wasn't accepted at %d", g.get("name"), model, price)
+                self._refused_gear.add(gid)
+                log.info("market: gear %s (%s) wasn't accepted at %d — skipping it this session",
+                         g.get("name"), model, price)
+        if salvage:
+            await self.salvage(salvage)
         return listed
+
+    async def salvage(self, gear: list[dict]) -> None:
+        """Dismantle gear into fragments (sold on the market next pass).
+        Never `destroy` — that gives nothing back."""
+        frags0 = {f: int((self.state.self_.get("inventory") or {}).get(f) or 0) for f in P.FRAGMENTS}
+        ids = [g["id"] for g in gear]
+        for i in range(0, len(ids), 20):
+            await self.client.send(P.dismantle(ids[i:i + 20]))
+            await asyncio.sleep(1.2)
+        gone = [g for g in gear if g["id"] not in self.state.gear]
+        for g in gone:
+            self.relists.pop(g["id"], None)
+        self._save_relists()
+        inv = self.state.self_.get("inventory") or {}
+        got = {f: int(inv.get(f) or 0) - n for f, n in frags0.items() if int(inv.get(f) or 0) > n}
+        self.counts["salvaged"] += len(gone)
+        log.info("market: salvaged %d/%d unsold gear -> %s", len(gone), len(gear), got or "no fragments seen yet")
+
+    def _save_relists(self) -> None:
+        try:
+            with open(self._relist_file, "w", encoding="utf-8") as f:
+                json.dump(self.relists, f)
+        except OSError:
+            log.debug("could not save relist counts", exc_info=True)
 
     def stock_value(self, keep_potions: int) -> float:
         """Rough market value of what we'd sell (last known prices, else 5x NPC)."""

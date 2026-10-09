@@ -14,7 +14,7 @@ from .automation import Automator
 from .client import LumivaraClient
 from .config import Config
 from .state import GameState
-from .telegram_bot import LumivaraTelegram
+from .telegram_bot import MENU_KEYBOARD, LumivaraTelegram
 
 log = logging.getLogger("lumivara")
 
@@ -37,6 +37,7 @@ async def _post_init(app: Application) -> None:
         await app.bot.send_message(orch.cfg.owner_chat_id, text, parse_mode="HTML",
                                    disable_notification=False)
     orch.automator.notify_cb = _notify
+    await tg.setup_commands()
 
     orch.tasks = [
         loop.create_task(orch.client.run(), name="ws-run"),
@@ -60,9 +61,11 @@ async def _post_init(app: Application) -> None:
     try:
         await app.bot.send_message(
             orch.cfg.owner_chat_id,
-            "✅ <b>Lumivara Sentinel online.</b>\nSend /menu to open the dashboard." + warn,
+            "✅ <b>Lumivara Sentinel online.</b>\nTap <b>📋 Menu</b> (or send /menu) for the dashboard." + warn,
             parse_mode="HTML",
+            reply_markup=MENU_KEYBOARD,
         )
+        app.bot_data["menu_kb_sent"] = True
     except Exception:  # noqa: BLE001
         log.warning("could not send startup message (check TELEGRAM_CHAT_ID)")
 

@@ -220,9 +220,9 @@ def _market_text(orch) -> str:
         lines.append(f"… and {len(orders) - 12} more")
     lines.append(f"\n<b>Gear</b>: {len(tr.listed_gear_ids())}/{c.market_gear_slots} on market · "
                  f"{len(au.spare_gear())} spare to sell · salvaged {tc['salvaged']} unsold → fragments")
-    lines.append(f"<i>Unsold gear is re-listed every {2 * c.market_reprice_hours:g}h; after "
-                 f"{P.GEAR_RELISTS_BEFORE_SALVAGE} tries it is dismantled into fragments (sold here too). "
-                 f"Nothing is ever destroyed.</i>")
+    lines.append(f"<i>Gear unsold for {c.market_gear_relist_hours:g}h is pulled and re-listed 15% cheaper; "
+                 f"after {P.GEAR_RELISTS_BEFORE_SALVAGE} unsold listings it is dismantled into fragments "
+                 f"(sold here too). Nothing is ever destroyed.</i>")
     lines.append(f"Upgrades: {'ON' if c.market_buy_gear else 'OFF'} · spent today "
                  f"{au._gear_spent:,}/{c.gear_daily_budget:,} · max {c.gear_max_price:,}/piece")
     if tr.prices:

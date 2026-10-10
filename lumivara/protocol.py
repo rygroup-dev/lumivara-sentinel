@@ -413,6 +413,7 @@ MARKET_SELL_KEEP = {
     "butterfly_wing": 15,       # Return Scrolls: we use a few
     "concentration_potion": 0,
     "relic_box": 0,
+    "card_album": 0,            # players pay ~9,000-11,800 (NPC 500); was never sold
 }
 # Salvage fragments from dismantled gear (~40-90 silver each on the market).
 FRAGMENTS = [f"{k}_fragment_{t}" for k in ("weapon", "equipment") for t in range(1, 6)]
@@ -437,10 +438,46 @@ MARKET_PRICE_HINT = {
     **{f: 40 for f in FRAGMENTS},
 }
 # What the town merchant charges, so we can buy from players when cheaper.
-NPC_BUY_PRICES = {"potion": 10, "butterfly_wing": 30}
+NPC_BUY_PRICES = {"potion": 10, "butterfly_wing": 30, "orange_potion": 50, "yellow_potion": 120}
+# Main healing potion: players sell Yellow Potions (300-350 HP) for ~13 silver,
+# ~7x more HP per silver than a Red Potion (37-53 HP) from the merchant at 10.
+BIG_POTION = "yellow_potion"
+BIG_POTION_HEAL = 325
+# bigger heals first when drinking
+HEAL_ORDER = ("white_potion", "yellow_potion", "orange_potion")
 
-# NPC merchant buy-back price for items that aren't monster materials
-NPC_PRICES = {"potion": 2, "orange_potion": 3, "yellow_potion": 4, "white_potion": 5}
+# NPC merchant buy-back price for items that aren't monster materials, from the
+# client item table (`price`). refine_stone (50) is left out on purpose: the
+# merchant run only sells monster loot, so a refine stone routed "to the NPC"
+# would just pile up instead of selling on the market.
+NPC_PRICES = {
+    "potion": 2, "orange_potion": 3, "yellow_potion": 4, "white_potion": 5,
+    "blue_potion": 10, "concentration_potion": 60, "awakening_potion": 125,
+    "berserk_potion": 250, "fly_wing": 15, "butterfly_wing": 15,
+    "relic_box": 250, "card_album": 500, "sacred_feather": 250,
+}
+
+# Bag weight & NPC gear prices (client tables). Above 90% of max weight the
+# server refuses attacks and skills ("น้ำหนักเกิน 90%"), so carried gear must be
+# kept in check. Worn gear weighs nothing; loot materials and cards weigh 0.1.
+GEAR_WEIGHT = {"head": 20, "face": 10, "mouth": 5, "sword": 50, "shield": 40, "armor": 80,
+               "garment": 20, "shoes": 25, "accessory1": 5, "accessory2": 5, "ammo": 1}
+GEAR_NPC_BASE = {"head": 60, "face": 35, "mouth": 25, "sword": 100, "shield": 80, "armor": 120,
+                 "garment": 50, "shoes": 45, "accessory1": 75, "accessory2": 75, "ammo": 10}
+OVERWEIGHT_MARK = "90%"
+FRAGMENT_VALUE_PER_TIER = 40   # rough market value of one fragment per gear tier
+
+
+def gear_weight(g: dict) -> float:
+    return 0 if g.get("gift") else GEAR_WEIGHT.get(g.get("slot"), 0)
+
+
+def gear_npc_price(g: dict) -> int:
+    """What the town merchant pays for a piece (verified: T1 coat with 7 bonus = 78)."""
+    base = GEAR_NPC_BASE.get(g.get("slot"), 0)
+    base += 5 * sum(v for v in (g.get("bonuses") or {}).values() if isinstance(v, (int, float)))
+    return max(1, round(base * 0.5)) if base > 0 else 0
+
 
 # Player-market fees (client constants): 2.5% listing fee paid up front,
 # 8% tax on what sells (less with premium), 1% on buy orders.

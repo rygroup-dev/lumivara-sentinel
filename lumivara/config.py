@@ -64,6 +64,7 @@ class Config:
 
     # town merchant run (needs ENABLE_SELL): sell loot, restock potions/arrows
     potion_target: int = 150      # keep this many Red Potions
+    big_potion_target: int = 60   # keep this many Yellow Potions (bought from players, ~13 each)
     potion_budget_pct: int = 30   # spend at most this % of current silver per restock
     arrow_min: int = 1000         # buy arrows when below this
     potion_keep: int = 150        # sell looted Red Potions above this (2 silver each)
@@ -78,6 +79,8 @@ class Config:
     gear_daily_budget: int = 5000     # silver per day for gear upgrades
     gear_max_price: int = 2500        # never pay more than this for one piece
     market_reprice_hours: float = 6.0
+    # gear unsold this long is pulled and relisted 15% cheaper; unsold again -> fragments
+    market_gear_relist_hours: float = 24.0
     market_every_min: int = 45    # town trip to the broker at most this often
 
     # Gold Exchange: convert spare silver to gold automatically
@@ -109,6 +112,7 @@ class Config:
             farm_zone=(os.getenv("FARM_ZONE", "auto").strip().lower() or "auto"),
             zone_margin=_i("ZONE_MARGIN", 5),
             potion_target=_i("POTION_TARGET", 150),
+            big_potion_target=_i("BIG_POTION_TARGET", 60),
             potion_budget_pct=_i("POTION_BUDGET_PCT", 30),
             arrow_min=_i("ARROW_MIN", 1000),
             potion_keep=_i("POTION_KEEP", 150),
@@ -120,6 +124,7 @@ class Config:
             gear_daily_budget=_i("GEAR_DAILY_BUDGET", 5000),
             gear_max_price=_i("GEAR_MAX_PRICE", 2500),
             market_reprice_hours=_f("MARKET_REPRICE_HOURS", 6.0),
+            market_gear_relist_hours=_f("MARKET_GEAR_RELIST_HOURS", 24.0),
             market_every_min=_i("MARKET_EVERY_MIN", 45),
             gold_autobuy=_b("GOLD_AUTOBUY", False),
             gold_reserve=_i("GOLD_RESERVE", 2000),

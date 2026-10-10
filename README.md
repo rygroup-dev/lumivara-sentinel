@@ -121,14 +121,14 @@ STATUS online | Lv49 archer @field (target field) | hp 930/930 | hp-pots 264 | s
 |---|---|
 | 🌾 **Farming** | Serang mob terdekat, rotasi skill, ambil loot, revive saat mati. Drop yang gagal diambil di-skip. |
 | 🗺 **Pilih map otomatis** | Dari tabel zona game (Verdant 1–10 sampai Sunfallen 121–130). Bot juga mengukur EXP, silver, potion dan kematian per map, lalu pilih map yang paling untung. Map yang bikin mati 3× atau boros potion dihindari dulu. Pindah map lewat portal. |
-| ❤️ **Heal hemat** | Minum potion hanya saat sedang diserang di bawah `POTION_HP_PERCENT`; HP kritis pakai Orange/Yellow/White. Kalau aman, duduk (regen gratis). |
+| ❤️ **Heal hemat** | Minum potion hanya saat sedang diserang di bawah `POTION_HP_PERCENT`; Yellow/White/Orange Potion dipakai duluan (Yellow dibeli dari market ±13 silver, heal 300–350), Red cuma cadangan. Kalau nggak ada mob dekat, duduk (regen gratis). |
 | 🏪 **Belanja di town** | Jalan ke merchant → jual loot monster → beli Red Potion (maks % silver), panah, Return Scroll. Potion < 5 di field → pulang pakai Return Scroll. Item terdaftar game (potion, scroll, refine stone, …) dan **card** tidak pernah dijual. |
 | 🎒 **Equip** | Pakai gear terbaik di tas per slot sesuai class (Archer → Bow, dst). |
 | ✨ **Skill** | Belajar skill class satu-satu (pasif damage dulu). |
 | 📊 **Stat** | Bobot per class (Archer DEX 3 : AGI 2 : VIT 1). Stat yang terlalu mahal ditunda sampai point cukup. |
 | ♻️ **Respec** | Di bawah Lv80 (gratis), kalau stat/skill terlanjur salah alokasi, bot ke Reset Master sekali lalu alokasi ulang. |
 | 📜 **Quest & hadiah** | 10 quest tutorial, daily, mail, hadiah 100 kill harian diklaim otomatis. Quest *change job* & *jual-beli* perlu kamu lakukan sekali di game. |
-| ⚖️ **Market pemain** (`ENABLE_MARKET`) | Di broker town: tiap loot, refine stone, card, potion lebih, blue potion, relic box, fly/butterfly wing dicek ke board (item hadiah/`gifted` tidak bisa dijual, otomatis dilewati). Gear class lain / lebih jelek dipasang 1 silver di bawah listing termurah model yang sama. Jual langsung ke bid kalau ≥85% harga rata-rata, kalau tidak pasang jual 1 silver di bawah ask termurah (tidak di bawah 85% rata-rata). Kalau NPC lebih untung setelah fee (2,5% pasang + 8% pajak), ditinggal untuk NPC. Potion dibeli dari market kalau lebih murah dari NPC. Order yang tidak laku > `MARKET_REPRICE_HOURS` dibatalkan & dipasang ulang dengan harga baru. |
+| ⚖️ **Market pemain** (`ENABLE_MARKET`) | Di broker town: tiap loot, refine stone, card, potion lebih, blue potion, relic box, fly/butterfly wing dicek ke board (item hadiah/`gifted` tidak bisa dijual, otomatis dilewati). Gear class lain / lebih jelek dipasang 1 silver di bawah listing termurah model yang sama; kalau `MARKET_GEAR_RELIST_HOURS` (24 jam) belum laku, dicabut dan dipasang ulang 15% lebih murah, dan kalau masih belum laku dibongkar jadi fragment (fragment ikut dijual). Tidak pernah di-*destroy*. Fly Wing / Return Scroll / potion tidak dijual di bawah harga NPC. Jual langsung ke bid kalau ≥85% harga rata-rata, kalau tidak pasang jual 1 silver di bawah ask termurah (tidak di bawah 85% rata-rata). Kalau NPC lebih untung setelah fee (2,5% pasang + 8% pajak), ditinggal untuk NPC. Potion dibeli dari market kalau lebih murah dari NPC. Order yang tidak laku > `MARKET_REPRICE_HOURS` dibatalkan & dipasang ulang dengan harga baru. |
 | 💰 **Gold Exchange** | Baca harga (bid/ask). Dengan `GOLD_AUTOBUY=true`, tiap 10 menit silver di atas `GOLD_RESERVE` ditukar ke Gold di ask termurah (maks `GOLD_MAX_PRICE`). |
 | 🧭 **Rute aman** | Rute portal tidak lewat map yang jauh di atas level (lewat town). Kalau nabrak tembok saat jalan ke portal, bot coba jalan memutar. |
 
@@ -159,11 +159,12 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `TELEGRAM_BOT_TOKEN` | — | Token dari @BotFather |
 | `TELEGRAM_CHAT_ID` | — | ID Telegram pemilik (satu-satunya yang bisa kontrol) |
 | `LUMIVARA_COOKIE` | — | `pixelrpg_google_session=...` |
-| `POTION_HP_PERCENT` | 35 | Minum potion di bawah HP% ini (saat diserang) |
+| `POTION_HP_PERCENT` | 55 | Minum potion di bawah HP% ini (saat diserang) |
 | `FARM_ZONE` | auto | `auto`, atau paksa: `field`, `meadow`, `snow`, `desert`, `swamp`, `wildwood`, `dunes`, `glacier`, `caldera`, `moor`, `crystal`, `tempest`, `citadel` |
 | `ZONE_MARGIN` | 15 | Map dipakai kalau level ≥ level minimum map + margin |
 | `ENABLE_SELL` | true | Belanja otomatis di town |
 | `POTION_TARGET` | 40 | Target stok Red Potion |
+| `BIG_POTION_TARGET` | 60 | Target stok Yellow Potion (dibeli dari market ±13 silver, heal 300–350 — dipakai duluan) |
 | `POTION_BUDGET_PCT` | 30 | Maks % silver untuk potion per kunjungan |
 | `ARROW_MIN` | 1000 | Beli 2000 panah kalau di bawah ini |
 | `POTION_KEEP` | 150 | Red Potion hasil drop di atas ini dijual |
@@ -172,7 +173,8 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `MARKET_SELL_CARDS` | true | Ikut jual card di market |
 | `MARKET_SELL_GEAR` | true | Jual gear yang tidak akan dipakai (class lain / lebih jelek) |
 | `MARKET_GEAR_SLOTS` | 20 | Maks gear dipasang sekaligus (40 kalau premium) |
-| `MARKET_REPRICE_HOURS` | 6 | Pasang ulang order yang belum laku setelah sekian jam |
+| `MARKET_REPRICE_HOURS` | 6 | Pasang ulang order item (loot, card, potion) yang belum laku setelah sekian jam |
+| `MARKET_GEAR_RELIST_HOURS` | 24 | Gear belum laku sekian jam → pasang ulang 15% lebih murah, lalu jadi fragment |
 | `MARKET_EVERY_MIN` | 45 | Paling sering ke broker tiap sekian menit |
 | `GOLD_AUTOBUY` | false | Tukar silver → Gold otomatis |
 | `GOLD_RESERVE` | 2000 | Silver yang selalu disisakan |

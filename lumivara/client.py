@@ -179,6 +179,10 @@ class LumivaraClient:
                         reason,
                     )
                     reconnect_delay = 5
+                elif code == 4003:  # "Hub busy": server still releasing our previous session
+                    self.last_error = ""
+                    log.info("server busy (%s) — retrying in 5s", reason or "hub busy")
+                    reconnect_delay = 5
                 else:
                     self.last_error = f"closed {code}: {reason}"
                     log.warning("websocket closed %s: %s", code, reason)

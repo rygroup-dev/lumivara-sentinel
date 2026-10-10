@@ -17,6 +17,7 @@ import itertools
 import json
 import logging
 import os
+import random
 import time
 
 from . import protocol as P
@@ -65,7 +66,10 @@ class Automator:
         self._equip_tries: dict[str, tuple[int, float]] = {}
         self._force_town = False
         self._potion_log: list[tuple[float, str]] = []
-        self.counts.update({"sold_silver": 0, "potions_bought": 0,
+        # carried spare-gear weight that last made the server refuse attacks
+        self._ow_seen = 0.0
+        self._weight_limit = self._load_weight_limit()
+        self.counts.update({"sold_silver": 0, "potions_bought": 0, "gear_npc_sold": 0,
                             "gold_bought": 0, "gold_silver_spent": 0})
         self.last_gold_price: int | None = None
         # skill learning: skill -> (attempts without progress, blocked until)
@@ -472,6 +476,71 @@ class Automator:
                 out.append(g)
         return out
 
+    # ---------------------------------------------------------- bag weight
+    _WEIGHT_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "weight_limit.json")
+
+    def _load_weight_limit(self) -> float:
+        try:
+            with open(self._WEIGHT_FILE, encoding="utf-8") as f:
+                return float(json.load(f).get("spare_gear_weight") or 0)
+        except (OSError, ValueError):
+            return 0.0
+
+    def _save_weight_limit(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._WEIGHT_FILE), exist_ok=True)
+            with open(self._WEIGHT_FILE, "w", encoding="utf-8") as f:
+                json.dump({"spare_gear_weight": self._weight_limit, "at": time.time()}, f)
+        except OSError:
+            pass
+
+    def spare_gear_weight(self) -> float:
+        return sum(P.gear_weight(g) for g in self.spare_gear())
+
+    def _gear_keep_value(self, g: dict) -> float:
+        """Best silver we can expect for a spare piece: NPC price, fragments, or
+        (net) the cheapest player listing of its model if we've priced it."""
+        npc = P.gear_npc_price(g)
+        frag = P.FRAGMENT_VALUE_PER_TIER * max(1, int(g.get("tier") or 1))
+        mk = (self.trader.gear_prices.get(self.trader.gear_model(g)) or {}).get("low") or 0
+        return max(npc, frag, P.market_net(mk) if mk else 0)
+
+    async def lighten_load(self) -> None:
+        """Next to the merchant: once we know the spare-gear weight that got us
+        blocked, keep carried spare gear at <=60% of it. Cheapest silver per
+        weight goes first; each piece goes to the NPC or is dismantled,
+        whichever pays more. Pieces worth clearly more on the market stay."""
+        limit = self._weight_limit
+        if not limit:
+            return
+        spare = self.spare_gear()
+        carried = sum(P.gear_weight(g) for g in spare)
+        target = 0.6 * limit
+        if carried <= target:
+            return
+        spare.sort(key=lambda g: self._gear_keep_value(g) / max(P.gear_weight(g), 0.5))
+        to_npc, to_frag, freed = [], [], 0.0
+        for g in spare:
+            if carried - freed <= target:
+                break
+            if P.gear_weight(g) <= 0:
+                continue
+            npc = P.gear_npc_price(g)
+            frag = P.FRAGMENT_VALUE_PER_TIER * max(1, int(g.get("tier") or 1))
+            (to_npc if npc >= frag else to_frag).append(g)
+            freed += P.gear_weight(g)
+        silver0 = int(self.state.self_.get("silver") or 0)
+        for i in range(0, len(to_npc), 20):
+            await self.client.send(P.sell_batch([{"gearId": g["id"]} for g in to_npc[i:i + 20]]))
+            await asyncio.sleep(1.5)
+        gained = int(self.state.self_.get("silver") or 0) - silver0
+        self.counts["gear_npc_sold"] += len(to_npc)
+        self.counts["sold_silver"] += max(gained, 0)
+        if to_frag:
+            await self.trader.salvage(to_frag)
+        log.info("bag: spare gear weight %.0f -> ~%.0f (limit %.0f): sold %d to NPC for %+d silver, dismantled %d",
+                 carried, carried - freed, limit, len(to_npc), gained, len(to_frag))
+
     # ---------------------------------------------------------- town run
     def _inv(self) -> dict:
         inv = self.state.self_.get("inventory")
@@ -519,6 +588,9 @@ class Automator:
             or (self.state.self_.get("classId") == "archer"
                 and int(inv.get(P.ARROW_ENTRY) or 0) < self.cfg.arrow_min)
             or int(inv.get(P.RETURN_SCROLL) or 0) < 3
+            or (self._weight_limit and self.spare_gear_weight() > 0.6 * self._weight_limit)
+            or (self.cfg.enable_market
+                and int(inv.get(P.BIG_POTION) or 0) < self.cfg.big_potion_target // 3)
         )
 
     async def town_run(self) -> None:
@@ -535,10 +607,16 @@ class Automator:
                 try:
                     await self.trader.sell_pass(self._potion_keep())
                     inv = self._inv()
-                    want = self.cfg.potion_target - int(inv.get(P.POTION_BUY_ENTRY) or 0)
                     silver = int(self.state.self_.get("silver") or 0)
-                    await self.trader.buy_cheap(P.POTION_BUY_ENTRY, want,
-                                                silver * self.cfg.potion_budget_pct // 100)
+                    budget = silver * self.cfg.potion_budget_pct // 100
+                    # Yellow Potions first: far more healing per silver than Reds
+                    big_want = self.cfg.big_potion_target - int(inv.get(P.BIG_POTION) or 0)
+                    if big_want > 0:
+                        got = await self.trader.buy_cheap(P.BIG_POTION, big_want, budget)
+                        budget -= got * 14
+                    inv = self._inv()
+                    want = self.cfg.potion_target - int(inv.get(P.POTION_BUY_ENTRY) or 0)
+                    await self.trader.buy_cheap(P.POTION_BUY_ENTRY, want, max(budget, 0))
                     if int(inv.get(P.RETURN_SCROLL) or 0) < 3:
                         await self.trader.buy_cheap(P.RETURN_SCROLL, 10, 300)
                     await self.buy_gear_upgrades()
@@ -560,6 +638,11 @@ class Automator:
         else:
             log.warning("town run: couldn't reach the merchant")
             return
+
+        try:
+            await self.lighten_load()
+        except Exception:  # noqa: BLE001 — never let bag tidying stop the town run
+            log.exception("lighten_load failed")
 
         silver0 = int(self.state.self_.get("silver") or 0)
         loot = self._sellable()
@@ -900,10 +983,10 @@ class Automator:
                 self.intel.note_potion(self.state.self_.get("area"), P.POTION_PRICE)
                 self._note_potion_burn()
                 inv = self._inv()
-                # critical: use the bigger heals first (orange/yellow/white), else the hotbar potion
-                big = next((k for k in ("white_potion", "yellow_potion", "orange_potion")
-                            if int(inv.get(k) or 0) > 0), None)
-                if self.state.hp_percent() < 30 and big:
+                # big heals first (white/yellow/orange): a hit can take ~400 HP in
+                # 4s, which a 45-HP Red Potion can't keep up with
+                big = next((k for k in P.HEAL_ORDER if int(inv.get(k) or 0) > 0), None)
+                if big:
                     await self.client.send_now(P.use_item(big))
                 else:
                     await self.client.send_now(P.potion())
@@ -927,6 +1010,29 @@ class Automator:
                     await self.client.send(P.sit(False))
                     continue
                 await asyncio.sleep(1.5)
+                continue
+
+            # 2c) over 90% weight: the server refuses every attack and skill, so
+            #     farming is pointless until the bag is lighter -> go and sell
+            if self.state.overweight_at > self._ow_seen:
+                self._ow_seen = self.state.overweight_at
+                carried = self.spare_gear_weight()
+                if carried > 0:
+                    self._weight_limit = min(self._weight_limit or carried, carried)
+                    self._save_weight_limit()
+                log.warning("bag over 90%% weight (spare gear ~%.0f) — attacks refused; heading to town to sell",
+                            carried)
+                self.notify("🎒 <b>Bag too heavy</b> — the game blocks attacks above 90% weight. "
+                            "Going to town to sell spare gear.", key="overweight", cooldown=1800)
+                self._force_town = True
+                self._last_town_run = 0.0
+                area = self.state.self_.get("area")
+                if area != P.TOWN:
+                    if int(self._inv().get(P.RETURN_SCROLL) or 0) > 0:
+                        await self.client.send(P.use_item(P.RETURN_SCROLL))
+                        await asyncio.sleep(2)
+                    else:
+                        await self.go_to(P.TOWN)
                 continue
 
             # 3) loot
@@ -1022,8 +1128,17 @@ class Automator:
                 self._no_mob_since = now
             if now - self._no_mob_since > 8 and now - self._last_travel > 15:
                 want = self.desired_zone()
-                log.info("no monsters in %s — heading to %s", self.state.self_.get("area"), want)
-                await self.go_to(want)
+                area = self.state.self_.get("area")
+                if area == want:
+                    # already on the right map, just in an empty corner: roam
+                    # instead of "travelling" to the map we're standing on
+                    self._last_travel = now
+                    x, y = random.randint(460, 2610), random.randint(460, 2610)
+                    log.info("no monsters nearby in %s — roaming to (%d, %d)", area, x, y)
+                    await self.client.send(P.move(x, y))
+                else:
+                    log.info("no monsters in %s — heading to %s", area, want)
+                    await self.go_to(want)
                 self._no_mob_since = time.time()
             await asyncio.sleep(1.2)
 

@@ -165,8 +165,9 @@ class Trader:
                 await self.client.send(P.market_cancel_order(o["id"]))
                 n += 1
                 await asyncio.sleep(0.8)
-        # gear listings get twice as long (fewer buyers per model)
-        gear_cutoff = time.time() - 2 * self.cfg.market_reprice_hours * 3600
+        # gear gets MARKET_GEAR_RELIST_HOURS (fewer buyers per model); each pull
+        # makes the next listing cheaper, and the second pull salvages it
+        gear_cutoff = time.time() - self.cfg.market_gear_relist_hours * 3600
         for x in self.my_listings():
             created = x.get("createdAt") or 0
             created = created / 1000 if created > 1e11 else created
@@ -382,7 +383,7 @@ class Trader:
     async def sell_gear(self, spare: list[dict]) -> list[str]:
         """List spare gear (another class's, or worse than what we wear) up to
         the listing cap, priced just under the cheapest listing of its model
-        but never below half the board average."""
+        but never below a tenth of the board average."""
         if not self.cfg.market_sell_gear or not spare:
             return []
         # our listing rows only arrive with a board answer: make sure we have one,
@@ -411,7 +412,12 @@ class Trader:
                 continue                # higher tiers with no listings may be rare: keep them
             if not p or not p["low"]:
                 continue
-            price = max(p["low"] - 1, int(p["avg"] * 0.5), 1)
+            # Undercut the cheapest listing. The board average is dragged up by
+            # wishful listings (an armor model with a 950 floor showed a 12,886
+            # average), so it only guards against an absurd lowball floor.
+            price = max(p["low"] - 1, int(p["avg"] * 0.1), 1)
+            # came back unsold before: 15% cheaper per earlier listing
+            price = max(int(price * (1 - 0.15 * self.relists.get(gid, 0))), 1)
             silver0 = int(self.state.self_.get("silver") or 0)
             await self.client.send(P.market_list_gear(gid, price))
             await asyncio.sleep(1.2)

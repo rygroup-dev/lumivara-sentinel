@@ -48,6 +48,7 @@ class GameState:
         # Equipment items in the bag/worn, from the top-level `gearRows` stream:
         # {id: {slot, template, name, tier, bonuses, locked, ...}}
         self.gear: dict[str, dict] = {}
+        self.overweight_at = 0.0        # last "over 90% weight" refusal from the server
         self.online: int = 0
         self.server_time: int = 0
         self.events: deque = deque(maxlen=50)
@@ -109,6 +110,11 @@ class GameState:
 
         for ev in msg.get("events", []) or []:
             self.events.append(ev)
+            # server refusing attacks/skills because the bag is over 90% weight
+            if (isinstance(ev, dict) and ev.get("type") == "skillError"
+                    and P.OVERWEIGHT_MARK in str(ev.get("text") or "")
+                    and ev.get("player") in (None, self.self_.get("id"))):
+                self.overweight_at = time.time()
 
         players = msg.get("players")
         if isinstance(players, list):
@@ -144,6 +150,9 @@ class GameState:
         if isinstance(gr, dict):
             if gr.get("reset"):
                 self.gear = {}
+            # the client drops sold / dismantled / listed pieces via `del`
+            for gid in gr.get("del") or []:
+                self.gear.pop(gid if isinstance(gid, str) else (gid or {}).get("id"), None)
             for g in gr.get("add") or []:
                 if isinstance(g, dict) and g.get("id"):
                     self.gear[g["id"]] = g

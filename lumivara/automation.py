@@ -109,6 +109,7 @@ class Automator:
         self.wb_pause_until_level = 0
         self._last_ch_switch = 0.0
         self._last_boss_walk = 0.0
+        self._last_pet_withdraw = 0.0
         # blacksmith
         self._refine_day = ""
         self._refine_spent = 0
@@ -465,6 +466,27 @@ class Automator:
             self.notify("⚒ <b>Refined</b> (safe, +4 max): " + ", ".join(done) +
                         f" · spent today {self._refine_spent:,}/{self.cfg.refine_daily_budget:,}",
                         key=f"refine{time.time()}", cooldown=0)
+
+    # ------------------------------------------------------------- pet bag
+    async def _withdraw_pet_bag(self) -> None:
+        """Loot a pet picks up sits in its own bag where nothing sells it:
+        move it into ours (not while overweight or dead)."""
+        bag = self.state.self_.get("petBag")
+        if not isinstance(bag, dict) or not self.state.connected or self.state.is_dead():
+            return
+        items = {k: v for k, v in (bag.get("inventory") or {}).items() if v}
+        gear = bag.get("gear") or []
+        if not items and not gear:
+            return
+        if time.time() - self._last_pet_withdraw < 120 or self._overweight_recently():
+            return
+        self._last_pet_withdraw = time.time()
+        await self.client.send(P.pet_withdraw_all())
+        log.info("pet bag: moved %d item kind(s) and %d gear into our bag", len(items), len(gear))
+
+    def _overweight_recently(self) -> bool:
+        """True if the server refused us for bag weight in the last 10 minutes."""
+        return time.time() - float(getattr(self.state, "overweight_at", 0) or 0) < 600
 
     # ------------------------------------------------------- card albums
     async def open_card_albums(self) -> list[str]:
@@ -1324,6 +1346,7 @@ class Automator:
                 self._watch_events()
                 if self.state.connected and int(self._inv().get(P.CARD_ALBUM) or 0) > 0:
                     await self.open_card_albums()
+                await self._withdraw_pet_bag()
             except Exception:  # noqa: BLE001
                 log.debug("event watch failed", exc_info=True)
             if s and not built and s.get("stats"):

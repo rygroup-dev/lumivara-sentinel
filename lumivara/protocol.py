@@ -173,6 +173,11 @@ REFINE_SAFE_MAX = 4              # +4 -> +5 can fail and destroy the item: never
 REFINE_ORDER = ("sword", "shield", "armor", "head", "garment", "shoes", "face", "mouth")
 
 
+def pet_withdraw_all() -> dict:
+    """Move everything the pet picked up into our own bag (so it gets sold)."""
+    return {"type": "petWithdraw", "all": True}
+
+
 def repair() -> dict:
     """Repair all worn gear (at the blacksmith; costs silver by tier and wear)."""
     return {"type": "repair"}

@@ -389,6 +389,8 @@ class Automator:
             cur = self.state.gear.get(worn.get(slot)) if worn.get(slot) else None
             cur_v = self.gear_value(cur) if cur else 0.0
             pick = None
+            seen = fits = 0
+            cheapest_better: tuple[int, str] | None = None   # (price, name) ignoring our price caps
             for tier in (top_tier, top_tier - 1):
                 if tier < 1 or (cur and int(cur.get("tier") or 1) > tier):
                     continue
@@ -396,15 +398,20 @@ class Automator:
                 if part:
                     q["part"] = part
                 rows = await self.trader.browse_gear(**q)
+                seen += len(rows or [])
                 for r in rows or []:
                     g = r["gear"]
                     if (self.worn_slot(g) != slot or not self.gear_level_ok(g)
                             or (slot == P.WEAPON_SLOT and g.get("template") not in allowed)):
                         continue
+                    fits += 1
                     gain = self.gear_value(g) - cur_v
                     price = int(r["price"])
-                    if (gain < max(1.0, cur_v * 0.15) or price > self.cfg.gear_max_price
-                            or price > budget):
+                    if gain < max(1.0, cur_v * 0.15):
+                        continue
+                    if not cheapest_better or price < cheapest_better[0]:
+                        cheapest_better = (price, f"{g.get('name')} +{gain:.0f}")
+                    if price > self.cfg.gear_max_price or price > budget:
                         continue
                     if not pick or gain / price > pick[0]:
                         pick = (gain / price, r, gain)
@@ -412,6 +419,11 @@ class Automator:
                 if pick:
                     break
             if not pick:
+                why = (f"cheapest clear upgrade {cheapest_better[1]} costs {cheapest_better[0]:,} "
+                       f"(cap {min(self.cfg.gear_max_price, budget):,})" if cheapest_better
+                       else "nothing ≥15% better than what we wear")
+                log.info("gear check %s (T%s, wearing %s): %d listings, %d fit — %s", slot, top_tier,
+                         cur.get("name") if cur else "nothing", seen, fits, why)
                 continue
             _ratio, r, gain = pick
             g = r["gear"]

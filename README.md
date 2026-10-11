@@ -172,6 +172,11 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `ENABLE_MARKET` | false | Jual-beli otomatis di market pemain |
 | `MARKET_SELL_CARDS` | true | Ikut jual card di market |
 | `OPEN_CARD_ALBUMS` | true | Buka Faded Card Album (kartu di dalamnya rata-rata ±14rb) daripada jual albumnya (±8rb) |
+| `WORLD_BOSS` | true | Ikut World Boss (tiap 4 jam, map acak, 5 CH) selama hadiah harian (3×) belum habis: pindah map + CH otomatis, revive di tempat saat mati |
+| `WORLD_BOSS_MIN_LEVEL` | 50 | Level minimum untuk ikut |
+| `AUTO_REPAIR` | true | Perbaiki gear di pandai besi sebelum rusak (senjata rusak = tidak bisa menyerang) |
+| `AUTO_REFINE` | true | Refine gear yang dipakai sampai +4 (pasti berhasil, tidak pernah lewat +4); refine stone yang dibutuhkan tidak dijual |
+| `REFINE_DAILY_BUDGET` | 3000 | Maks silver per hari untuk refine |
 
 **Aturan harga market (anti jual rugi):** patokan = median harga transaksi per jam (24 jam terakhir), bukan rata-rata, supaya satu transaksi ekstrem tidak mengacaukan. Jual langsung ke bid hanya kalau bid ≥ 85% median. Kalau pasang jual: 1 silver di bawah penjual termurah, tapi tidak pernah di bawah 85% median (penjual yang banting harga tidak diikuti), dan kalau penjual termurah minta > 1,5× median, dipasang ±1,2× median supaya tetap laku. Hasil bersih setelah fee (2,5% pasang + 8% pajak) selalu dibandingkan dengan harga NPC — mana yang memberi silver lebih banyak, itu yang dipakai. Gear tidak pernah dipasang lebih murah dari harga NPC/salvage-nya. Beli Gold ditahan kalau harga > 12% di atas median transaksi Gold.
 | `MARKET_SELL_GEAR` | true | Jual gear yang tidak akan dipakai (class lain / lebih jelek) |

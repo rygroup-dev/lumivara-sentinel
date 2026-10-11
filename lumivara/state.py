@@ -50,6 +50,10 @@ class GameState:
         self.gear: dict[str, dict] = {}
         self.overweight_at = 0.0        # last "over 90% weight" refusal from the server
         self.online: int = 0
+        self.channel: int | None = None
+        self.region: str | None = None
+        self.bosses: list = []
+        self.boss_channels: list = []
         self.server_time: int = 0
         self.events: deque = deque(maxlen=50)
         self.connected: bool = False
@@ -105,6 +109,15 @@ class GameState:
 
         if isinstance(msg.get("online"), int):
             self.online = msg["online"]
+        # channel (CH) we're on, our region, and where bosses are (world boss)
+        if isinstance(msg.get("channel"), int):
+            self.channel = msg["channel"]
+        if isinstance(msg.get("region"), str):
+            self.region = msg["region"]
+        if isinstance(msg.get("bosses"), list):
+            self.bosses = msg["bosses"]
+        if isinstance(msg.get("bossChannels"), list):
+            self.boss_channels = msg["bossChannels"]
         if isinstance(msg.get("time"), int):
             self.server_time = msg["time"]
 

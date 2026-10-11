@@ -165,6 +165,47 @@ def market_cancel_order(order_id: str) -> dict:
     return {"type": "marketCancelOrder", "orderId": order_id}
 
 
+# Blacksmith in town: repairs worn gear and refines (+0..+4 always succeeds).
+SMITH_POS = (585, 550)
+WEAR_MAX = 30000                 # a piece at this wear is broken (a broken weapon can't attack)
+REFINE_SAFE_MAX = 4              # +4 -> +5 can fail and destroy the item: never go past +4
+# which worn slots to refine first: damage first, then defence
+REFINE_ORDER = ("sword", "shield", "armor", "head", "garment", "shoes", "face", "mouth")
+
+
+def repair() -> dict:
+    """Repair all worn gear (at the blacksmith; costs silver by tier and wear)."""
+    return {"type": "repair"}
+
+
+def refine(gear_id: str, level: int) -> dict:
+    """Refine one level. `level` is the current +N; no risk, no protection stone."""
+    return {"type": "refine", "gearId": gear_id, "level": int(level),
+            "acceptRisk": False, "useProtection": False}
+
+
+def revive_here() -> dict:
+    """Stand up where we fell (full HP, brief immunity); costs silver on most maps."""
+    return {"type": "reviveHere"}
+
+
+def channel(ch: int, region: str | None) -> dict:
+    """Switch to another channel (CH) of the current map/region."""
+    m: dict = {"type": "channel", "channel": int(ch)}
+    if region:
+        m["region"] = region
+    return m
+
+
+# World boss Terragorn (Lv135, 4B HP shared by 5 CH): spawns every 4h on a
+# random hunting map. Anyone dealing >=0.5% of the top contributor's damage
+# gets the reward by mail (3 times a day): EXP, an Earthcore Chest (3 white
+# potions, 2 refine stones, 8 map materials, 1 boss-tier gear) and a share of
+# 17 card albums + relic boxes. Status: GET /api/world-boss, our quota:
+# GET /api/world-boss/mine.
+WORLD_BOSS_KEY = "terragorn"
+
+
 def market_buy_listing(listing_id: str) -> dict:
     return {"type": "marketBuyListing", "listingId": listing_id}
 

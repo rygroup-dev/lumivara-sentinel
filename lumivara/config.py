@@ -75,6 +75,11 @@ class Config:
     market_sell_cards: bool = True
     market_sell_gear: bool = True     # list gear we won't wear (other class / worse)
     open_card_albums: bool = True     # open albums (card inside ~14k avg) instead of selling (~8k)
+    world_boss: bool = True           # join the 4-hourly world boss for its rewards
+    world_boss_min_level: int = 50
+    auto_repair: bool = True          # repair worn gear at the blacksmith before it breaks
+    auto_refine: bool = True          # refine worn gear to +4 (always succeeds, never past +4)
+    refine_daily_budget: int = 3000   # silver per day for refining
     market_gear_slots: int = 20       # gear listings allowed at once (40 with premium)
     market_buy_gear: bool = True      # buy clear gear upgrades from players
     gear_daily_budget: int = 5000     # silver per day for gear upgrades
@@ -121,6 +126,11 @@ class Config:
             market_sell_cards=_b("MARKET_SELL_CARDS", True),
             market_sell_gear=_b("MARKET_SELL_GEAR", True),
             open_card_albums=_b("OPEN_CARD_ALBUMS", True),
+            world_boss=_b("WORLD_BOSS", True),
+            world_boss_min_level=_i("WORLD_BOSS_MIN_LEVEL", 50),
+            auto_repair=_b("AUTO_REPAIR", True),
+            auto_refine=_b("AUTO_REFINE", True),
+            refine_daily_budget=_i("REFINE_DAILY_BUDGET", 3000),
             market_gear_slots=_i("MARKET_GEAR_SLOTS", 20),
             market_buy_gear=_b("MARKET_BUY_GEAR", True),
             gear_daily_budget=_i("GEAR_DAILY_BUDGET", 5000),

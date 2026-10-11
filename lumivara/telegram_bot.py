@@ -111,6 +111,7 @@ def render_dashboard(orch) -> tuple[str, InlineKeyboardMarkup]:
             f"{au.counts.get('gold_bought', 0)} for {au.counts.get('gold_silver_spent', 0):,} · "
             f"price {f'{price:,}' if price else '?'} · keeps {orch.cfg.gold_reserve:,}\n"
         )
+        farm_line += _world_boss_line(orch)
         intel = au.intel.summary_lines(st.self_.get("area"))
         if intel:
             farm_line += "\n<b>📈 Maps</b>\n" + "".join(
@@ -196,6 +197,29 @@ def _equip_menu(orch) -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("⬅️ Back", callback_data="refresh")],
     ]
     return txt, InlineKeyboardMarkup(kb)
+
+
+def _world_boss_line(orch) -> str:
+    au = orch.automator
+    if not orch.cfg.world_boss:
+        return "👹 world boss OFF (WORLD_BOSS=false)\n"
+    st = au.wb_status or {}
+    mine = au.wb_mine or {}
+    quota = f"{mine.get('count', '?')}/{mine.get('limit', st.get('limit', 3))} today"
+    if au.wb_target:
+        mins = (time.time() - au.wb_started) / 60
+        return (f"👹 <b>fighting the world boss</b> in {html.escape(str(au.wb_target['area']))} "
+                f"({mins:.0f} min) · rewards {quota}\n")
+    cur = st.get("current") or {}
+    if not st:
+        return "👹 world boss: checking…\n"
+    # server clock at the last check, moved forward by the time since then
+    now_ms = int(st.get("now") or 0) + int((time.time() - au.wb_status_at) * 1000)
+    if cur and not cur.get("fell") and int(cur.get("ends") or 0) > now_ms:
+        return f"👹 world boss up in {html.escape(str(cur.get('area')))} · rewards {quota}\n"
+    left = max(0, int(cur.get("ends") or 0) - now_ms) // 1000
+    nxt = f"{left // 3600}h {left % 3600 // 60}m" if left else "soon"
+    return f"👹 world boss next in {nxt} · rewards {quota}\n"
 
 
 def _market_text(orch) -> str:
@@ -284,7 +308,10 @@ def _settings_text(orch) -> str:
         f"Market: {c.enable_market} · cards {c.market_sell_cards} · gear sell {c.market_sell_gear} "
         f"({c.market_gear_slots} slots) · reprice {c.market_reprice_hours}h · every {c.market_every_min} min\n"
         f"Gear upgrades: {c.market_buy_gear} · {c.gear_daily_budget:,}/day · max {c.gear_max_price:,}/piece\n"
-        f"Gold auto-buy: {c.gold_autobuy} · reserve {c.gold_reserve:,} · max {c.gold_max_price:,}/gold\n\n"
+        f"Gold auto-buy: {c.gold_autobuy} · reserve {c.gold_reserve:,} · max {c.gold_max_price:,}/gold\n"
+        f"Card albums: open {c.open_card_albums} · World boss: {c.world_boss} (Lv{c.world_boss_min_level}+)\n"
+        f"Blacksmith: repair {c.auto_repair} · refine to +4 {c.auto_refine} "
+        f"({c.refine_daily_budget:,}/day)\n\n"
         "<i>Edit .env and restart to change these.</i>"
     )
 

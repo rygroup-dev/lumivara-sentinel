@@ -52,6 +52,7 @@ class Trader:
         self.gear_prices: dict[str, dict] = {}
         self._listed_now: set[str] = set()    # gear ids we listed this session
         self._refused_gear: set[str] = set()  # gear the market wouldn't take this session
+        self.refine_keep = 0                  # refine stones not to sell (set by Automator)
         self.spare_gear = lambda: []          # replaced by Automator.spare_gear
         self._ask = 100
         self.notify = lambda *a, **k: None    # replaced by Automator.notify
@@ -111,7 +112,9 @@ class Trader:
             if tradable <= 0 or item in locked or item in P.UNTRADABLE:
                 continue
             # how many to keep for our own use (gifted units count towards it)
-            if item in P.LOOT_ITEM_MOB or item == "refine_stone":
+            if item == "refine_stone":
+                keep = self.refine_keep        # stones held back for our own safe refines
+            elif item in P.LOOT_ITEM_MOB:
                 keep = 0
             elif item.endswith("_card"):
                 if not self.cfg.market_sell_cards:

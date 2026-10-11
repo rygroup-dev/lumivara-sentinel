@@ -98,6 +98,21 @@ class Automator:
         self._gear_spent = 0
         self._probe_try = 0.0
         self.market_requested = False
+        # world boss
+        self.wb_target: dict | None = None
+        self.wb_status: dict | None = None
+        self.wb_status_at = 0.0
+        self.wb_mine: dict | None = None
+        self.wb_count_before = 0
+        self.wb_started = 0.0
+        self.wb_misses = 0
+        self.wb_pause_until_level = 0
+        self._last_ch_switch = 0.0
+        self._last_boss_walk = 0.0
+        # blacksmith
+        self._refine_day = ""
+        self._refine_spent = 0
+        self._last_refine_try = 0.0
         self.notify_cb = None             # async (text) -> None, set by the app (Telegram)
         self._notified: dict[str, float] = {}
         self._offline_since = 0.0
@@ -354,6 +369,102 @@ class Automator:
             if slot not in best or score > best[slot][0]:
                 best[slot] = (score, gid)
         return {slot: gid for slot, (_s, gid) in best.items()}
+
+    # ------------------------------------------------------ blacksmith
+    def gear_wear(self, gid: str) -> int:
+        """0..WEAR_MAX; worn gear wears down with every kill (client rule)."""
+        wearing = self.state.self_.get("wearing")
+        w = wearing.get(gid) if isinstance(wearing, dict) else None
+        if w is None:
+            w = self.state.gear.get(gid, {}).get("wear")
+        try:
+            return max(0, min(P.WEAR_MAX, int(w or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def repair_level(self) -> int:
+        """0 = fine, 1 = repair on the next town visit, 2 = go now (weapon about to break)."""
+        if not self.cfg.auto_repair:
+            return 0
+        worn = self.state.self_.get("equipped") or {}
+        worst = max((self.gear_wear(g) for g in worn.values() if g), default=0)
+        weapon = self.gear_wear(worn.get(P.WEAPON_SLOT)) if worn.get(P.WEAPON_SLOT) else 0
+        if weapon >= 0.85 * P.WEAR_MAX:
+            return 2
+        if weapon >= 0.5 * P.WEAR_MAX or worst >= 0.6 * P.WEAR_MAX:
+            return 1
+        return 0
+
+    def refine_targets(self) -> list[tuple[str, str, int, int]]:
+        """[(slot, gear id, current +N, stones per step)] for worn gear below +4."""
+        if not self.cfg.auto_refine:
+            return []
+        worn = self.state.self_.get("equipped") or {}
+        out = []
+        for slot in P.REFINE_ORDER:
+            gid = worn.get(slot)
+            g = self.state.gear.get(gid) if gid else None
+            if not g:
+                continue
+            cur = int(g.get("refine") or 0)
+            if cur >= P.REFINE_SAFE_MAX:
+                continue
+            two_handed = slot == P.WEAPON_SLOT and g.get("template") in P.TWO_HANDED
+            out.append((slot, gid, cur, 2 if two_handed else 1))
+        return out
+
+    def refine_stones_keep(self) -> int:
+        """Refine stones to hold back from the market for the safe +4 refines."""
+        return sum((P.REFINE_SAFE_MAX - cur) * per for _s, _g, cur, per in self.refine_targets())
+
+    def _refine_budget_left(self) -> int:
+        day = time.strftime("%Y-%m-%d")
+        if self._refine_day != day:
+            self._refine_day, self._refine_spent = day, 0
+        silver = int(self.state.self_.get("silver") or 0)
+        return min(self.cfg.refine_daily_budget - self._refine_spent,
+                   max(0, silver - self.cfg.gold_reserve))
+
+    def smith_due(self) -> bool:
+        stones = int(self._inv().get("refine_stone") or 0)
+        refine = (stones > 0 and self.refine_targets() and self._refine_budget_left() > 200
+                  and time.time() - self._last_refine_try > 1800)
+        return bool(self.repair_level() or refine)
+
+    async def smith_visit(self) -> None:
+        """In town: repair worn gear, then refine worn pieces toward +4."""
+        if not await self._walk_to(P.SMITH_POS):
+            log.warning("blacksmith: couldn't reach him")
+            return
+        if self.repair_level():
+            silver0 = int(self.state.self_.get("silver") or 0)
+            await self.client.send(P.repair())
+            await asyncio.sleep(1.5)
+            paid = silver0 - int(self.state.self_.get("silver") or 0)
+            log.info("blacksmith: repaired gear for %d silver (wear now %s)", paid,
+                     {s: self.gear_wear(g) for s, g in (self.state.self_.get("equipped") or {}).items()})
+        self._last_refine_try = time.time()
+        done = []
+        for slot, gid, cur, per in self.refine_targets():
+            while cur < P.REFINE_SAFE_MAX:
+                if int(self._inv().get("refine_stone") or 0) < per or self._refine_budget_left() <= 200:
+                    break
+                silver0 = int(self.state.self_.get("silver") or 0)
+                await self.client.send(P.refine(gid, cur))
+                await asyncio.sleep(1.5)
+                now_lvl = int(self.state.gear.get(gid, {}).get("refine") or 0)
+                paid = silver0 - int(self.state.self_.get("silver") or 0)
+                if now_lvl <= cur:
+                    log.info("blacksmith: refine of %s +%d wasn't accepted (paid %d)", slot, cur, paid)
+                    break
+                self._refine_spent += max(paid, 0)
+                cur = now_lvl
+                done.append(f"{slot} +{cur}")
+                log.info("blacksmith: refined %s to +%d for %d silver", slot, cur, paid)
+        if done:
+            self.notify("⚒ <b>Refined</b> (safe, +4 max): " + ", ".join(done) +
+                        f" · spent today {self._refine_spent:,}/{self.cfg.refine_daily_budget:,}",
+                        key=f"refine{time.time()}", cooldown=0)
 
     # ------------------------------------------------------- card albums
     async def open_card_albums(self) -> list[str]:
@@ -618,6 +729,7 @@ class Automator:
             self._sellable()
             or self._spare_potions()
             or self._market_due()
+            or self.smith_due()
             or int(inv.get(P.POTION_BUY_ENTRY) or 0) < self.cfg.potion_target // 2
             or (self.state.self_.get("classId") == "archer"
                 and int(inv.get(P.ARROW_ENTRY) or 0) < self.cfg.arrow_min)
@@ -640,6 +752,7 @@ class Automator:
             if await self._walk_to(P.BROKER_POS):
                 try:
                     await self.open_card_albums()       # sell the cards, not the album
+                    self.trader.refine_keep = self.refine_stones_keep()   # stones for safe +4s
                     await self.trader.sell_pass(self._potion_keep())
                     inv = self._inv()
                     silver = int(self.state.self_.get("silver") or 0)
@@ -719,6 +832,13 @@ class Automator:
         if (self.state.self_.get("classId") == "archer"
                 and int(inv.get(P.ARROW_ENTRY) or 0) < self.cfg.arrow_min):
             await buy(P.ARROW_ENTRY, 2000, 0.1)
+
+        # 3) blacksmith: repair before anything breaks, then safe refines (+4 max)
+        if self.smith_due():
+            try:
+                await self.smith_visit()
+            except Exception:  # noqa: BLE001
+                log.exception("blacksmith visit failed")
 
         if not os.path.exists(os.path.join(os.path.dirname(self._BAN_FILE), "market_probe.json")):
             try:
@@ -993,9 +1113,18 @@ class Automator:
                 if self.flags["revive"]:
                     log.info("died in %s — reviving", self.state.self_.get("area"))
                     self.counts["revive"] += 1
+                    self._resting = False
+                    if self.wb_target:
+                        # boss fight: stand up right here (paid) instead of walking back from town
+                        silver0 = int(self.state.self_.get("silver") or 0)
+                        await self.client.send(P.revive_here())
+                        await asyncio.sleep(1.5)
+                        if not self.state.is_dead():
+                            log.info("world boss: revived on the spot for %d silver",
+                                     silver0 - int(self.state.self_.get("silver") or 0))
+                            continue
                     self.intel.note_death(self.state.self_.get("area"))
                     self._record_death()
-                    self._resting = False
                     self._target = None
                     await self.client.send(P.revive())
                 await asyncio.sleep(1.0)
@@ -1015,8 +1144,9 @@ class Automator:
             ):
                 self.counts["potion"] += 1
                 self._last_potion = time.time()
-                self.intel.note_potion(self.state.self_.get("area"), P.POTION_PRICE)
-                self._note_potion_burn()
+                if not self.wb_target:      # boss fights aren't the farm map's fault
+                    self.intel.note_potion(self.state.self_.get("area"), P.POTION_PRICE)
+                    self._note_potion_burn()
                 inv = self._inv()
                 # big heals first (white/yellow/orange): a hit can take ~400 HP in
                 # 4s, which a 45-HP Red Potion can't keep up with
@@ -1025,6 +1155,11 @@ class Automator:
                     await self.client.send_now(P.use_item(big))
                 else:
                     await self.client.send_now(P.potion())
+                continue
+
+            # 2a) world boss is up and worth our time: go hit it
+            if self.wb_target:
+                await self._boss_step()
                 continue
 
             # 2b) hurt and nothing nearby -> sit to regenerate, stand when healthy
@@ -1082,7 +1217,7 @@ class Automator:
 
             # 3) town errands: free build reset at the Reset Master, market look at the broker
             probe_due = self._market_probe_due()
-            market_due = self._market_due()
+            market_due = self._market_due() or self.repair_level() >= 2   # weapon about to break
             if self.respec_due() or probe_due or market_due:
                 if area == P.TOWN:
                     if self.respec_due():
@@ -1211,7 +1346,10 @@ class Automator:
                 log.info("GEAR %d pieces (%d spare): %s", len(self.state.gear),
                          len(spare), json.dumps(dict(sorted(by.items()))))
                 worn = s.get("equipped") or {}
-                log.info("WORN %s", {k: self.state.gear.get(v, {}).get("name", v) for k, v in worn.items()})
+                log.info("WORN %s", {k: f"{self.state.gear.get(v, {}).get('name', v)} "
+                                        f"+{self.state.gear.get(v, {}).get('refine') or 0} "
+                                        f"wear {100 * self.gear_wear(v) // P.WEAR_MAX}%"
+                                     for k, v in worn.items()})
                 log.info("SPARE (first 15): %s", [f"{g.get('name')}#{g['id'][:4]}" for g in spare[:15]])
             if s and time.time() - last_report > 600:
                 last_report = time.time()
@@ -1473,6 +1611,130 @@ class Automator:
 
     async def open_storage(self) -> None:
         await self.client.send(P.storage_open())
+
+    # ---------------------------------------------------------- world boss
+    async def boss_loop(self) -> None:
+        """Watch /api/world-boss. Whenever the boss is up and we still have
+        reward quota today, switch the farm loop into boss mode (travel,
+        change CH, attack); afterwards report whether the reward came."""
+        await asyncio.sleep(30)
+        while not self._stop:
+            delay = 300.0
+            try:
+                delay = await self._boss_check()
+            except Exception:  # noqa: BLE001 — never let this kill the bot
+                log.debug("world boss check failed", exc_info=True)
+            await asyncio.sleep(delay)
+
+    async def _boss_check(self) -> float:
+        """One status check; returns seconds until the next one."""
+        if not self.cfg.world_boss:
+            self.wb_target = None
+            return 600
+        st = await self.client.http_get("/api/world-boss")
+        mine = await self.client.http_get("/api/world-boss/mine")
+        if not isinstance(st, dict) or not st.get("ok"):
+            return 120
+        self.wb_status = st
+        self.wb_status_at = time.time()
+        if isinstance(mine, dict) and mine.get("ok"):
+            self.wb_mine = mine
+        now_ms = int(st.get("now") or time.time() * 1000)
+        cur = st.get("current") or {}
+        alive = bool(cur) and st.get("on") and not cur.get("fell") and int(cur.get("ends") or 0) > now_ms
+        count = int((self.wb_mine or {}).get("count") or 0)
+        limit = int((self.wb_mine or {}).get("limit") or st.get("limit") or 3)
+        lvl = int(self.state.self_.get("level") or 0)
+        eligible = (lvl >= self.cfg.world_boss_min_level and count < limit
+                    and lvl >= self.wb_pause_until_level)
+
+        if alive and eligible:
+            if not self.wb_target:
+                self.wb_target = {"area": cur.get("area"), "channels": list(cur.get("channels") or []),
+                                  "at": cur.get("at")}
+                self.wb_count_before = count
+                self.wb_started = time.time()
+                log.info("world boss up in %s CH %s (Lv%s) — joining", cur.get("area"),
+                         cur.get("channels"), cur.get("level"))
+                self.notify(f"👹 <b>World boss</b> up in {cur.get('area')} "
+                            f"(CH {', '.join(map(str, cur.get('channels') or []))}) — going to fight it "
+                            f"· rewards today {count}/{limit}", key=f"wb{cur.get('at')}", cooldown=3600)
+            return 20                       # fights last ~5-10 min: check often
+        if self.wb_target:
+            # it's over (killed or gone): did it pay?
+            self.wb_target = None
+            if count > self.wb_count_before:
+                self.wb_misses = 0
+                log.info("world boss reward earned (%d/%d today)", count, limit)
+                self.notify(f"🎁 <b>World boss reward earned</b> ({count}/{limit} today) — "
+                            "Earthcore Chest, cards and relic boxes arrive by mail.",
+                            key=f"wbok{count}", cooldown=60)
+            elif cur.get("fell"):
+                # keep joining anyway (owner's call): every fight we get stronger
+                self.wb_misses += 1
+                log.info("world boss down but no reward for us this time (%d so far) — "
+                         "our share was under 0.5%% of the top fighter", self.wb_misses)
+                self.notify("👹 World boss down — no reward this time (our damage was under 0.5% of "
+                            "the top fighter). We'll keep joining; it gets easier as we level.",
+                            key="wbmiss", cooldown=4 * 3600)
+        # sleep until shortly before the next spawn (but re-check at least every 10 min)
+        nxt = int(cur.get("ends") or 0) if cur.get("fell") or not alive else 0
+        if nxt > now_ms:
+            return max(20.0, min(600.0, (nxt - now_ms) / 1000 - 20))
+        return 120
+
+    def _world_boss_mob(self) -> int | None:
+        for mid, row, info in self.state.alive_mobs():
+            key = str(info.get("key") or "").lower()
+            name = str(info.get("name") or "").lower()
+            if key == P.WORLD_BOSS_KEY or P.WORLD_BOSS_KEY in name or int(info.get("maxHp") or 0) >= 10 ** 8:
+                return mid
+        return None
+
+    async def _boss_step(self) -> None:
+        """One farm-loop step in boss mode: get to the map, onto a boss CH,
+        then keep attacking the boss (rotation skills included)."""
+        tgt = self.wb_target
+        area = self.state.self_.get("area")
+        now = time.time()
+        if area != tgt["area"]:
+            if now - self._last_travel > 5:
+                self._target = None
+                await self.go_to(tgt["area"])
+            else:
+                await asyncio.sleep(1)
+            return
+        chans = tgt.get("channels") or []
+        if chans and self.state.channel not in chans and now - self._last_ch_switch > 20:
+            self._last_ch_switch = now
+            ch = chans[0]
+            log.info("world boss: switching to CH %s (on %s)", ch, self.state.channel)
+            await self.client.send(P.channel(ch, self.state.region))
+            await asyncio.sleep(3)
+            return
+        boss = self._world_boss_mob()
+        if boss is None:
+            # not in sight: walk toward where the server says bosses are
+            spot = next((b for b in self.state.bosses if isinstance(b, dict) and "x" in b), None)
+            if spot and now - self._last_boss_walk > 4:
+                self._last_boss_walk = now
+                await self.client.send(P.move(int(spot["x"]), int(spot["y"])))
+            await asyncio.sleep(1)
+            return
+        self._target = boss
+        buff = self._due_buff()
+        if buff:
+            self._buff_at[buff] = now
+            await self.client.send(P.skill(buff))
+            return
+        if self._rot_counter % 3 == 0:
+            sk = self._rotation_skill()
+            if sk:
+                await self.client.send(P.skill(sk, boss))
+                return
+        self._rot_counter += 1
+        self.counts["attack"] += 1
+        await self.client.send(P.attack(boss))
 
     # ----------------------------------------------------------- gold loop
     async def gold_loop(self) -> None:

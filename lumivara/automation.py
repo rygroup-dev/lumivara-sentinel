@@ -355,6 +355,28 @@ class Automator:
                 best[slot] = (score, gid)
         return {slot: gid for slot, (_s, gid) in best.items()}
 
+    # ------------------------------------------------------- card albums
+    async def open_card_albums(self) -> list[str]:
+        """Open every Faded Card Album (gifted ones too): the card inside is
+        worth ~14k on average vs ~8k for the album. Returns the cards gained."""
+        if not self.cfg.open_card_albums:
+            return []
+        n = int(self._inv().get(P.CARD_ALBUM) or 0)
+        if n <= 0 or self.state.is_dead():
+            return []
+        before = {k: int(v or 0) for k, v in self._inv().items() if k.endswith("_card")}
+        await self.client.send(P.use_items(P.CARD_ALBUM, n))
+        await asyncio.sleep(2.0)
+        after = {k: int(v or 0) for k, v in self._inv().items() if k.endswith("_card")}
+        got = [f"{k} x{after[k] - before.get(k, 0)}" for k in after if after[k] > before.get(k, 0)]
+        left = int(self._inv().get(P.CARD_ALBUM) or 0)
+        log.info("opened %d card album(s) -> %s (%d left)", n - left, got or "nothing seen yet", left)
+        if got:
+            self._last_rare = None      # don't double-notify these as drops
+            self.notify("📖 <b>Card album opened</b>: " + ", ".join(g.replace("_", " ") for g in got) +
+                        "\nselling on the market next.", key=f"album{time.time()}", cooldown=0)
+        return got
+
     # ------------------------------------------------- gear from the market
     def _gear_budget_left(self) -> int:
         day = time.strftime("%Y-%m-%d")
@@ -617,6 +639,7 @@ class Automator:
         if self.cfg.enable_market:
             if await self._walk_to(P.BROKER_POS):
                 try:
+                    await self.open_card_albums()       # sell the cards, not the album
                     await self.trader.sell_pass(self._potion_keep())
                     inv = self._inv()
                     silver = int(self.state.self_.get("silver") or 0)
@@ -1164,6 +1187,8 @@ class Automator:
             s = self.state.self_
             try:
                 self._watch_events()
+                if self.state.connected and int(self._inv().get(P.CARD_ALBUM) or 0) > 0:
+                    await self.open_card_albums()
             except Exception:  # noqa: BLE001
                 log.debug("event watch failed", exc_info=True)
             if s and not built and s.get("stats"):
@@ -1495,6 +1520,12 @@ class Automator:
         self.last_gold_price = best
         if best > self.cfg.gold_max_price:
             log.info("gold: best ask %d silver > GOLD_MAX_PRICE %d — waiting", best, self.cfg.gold_max_price)
+            return 0
+        # don't buy into a spike: compare with what gold has actually traded at
+        usual = self.trader.analyse(self.state.gold_market).get("median") or 0
+        if usual and best > usual * 1.12:
+            log.info("gold: best ask %d is >12%% above the usual %d — waiting for a better price",
+                     best, int(usual))
             return 0
         # buy only what the cheapest level holds, with ~5% headroom for fees
         qty = min(int(spend // (best * 1.05)), int(asks[0].get("quantity") or 0))

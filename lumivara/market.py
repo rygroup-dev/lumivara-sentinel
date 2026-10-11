@@ -82,12 +82,17 @@ class Trader:
         hist = (m.get("history") or [])[-HISTORY_BUCKETS:]
         vol = sum(int(h.get("v") or 0) for h in hist)
         sil = sum(int(h.get("s") or 0) for h in hist)
+        # median of the hourly average prices: one freak trade (a card that once
+        # went for 300k) can drag the mean far from what things really sell for
+        per = sorted(int(h["s"]) / int(h["v"]) for h in hist if int(h.get("v") or 0) > 0)
+        median = (per[len(per) // 2] if len(per) % 2 else (per[len(per) // 2 - 1] + per[len(per) // 2]) / 2) if per else 0.0
         return {
             "bid": int(bids[0]["price"]) if bids else 0,
             "bid_qty": int(bids[0].get("quantity") or 0) if bids else 0,
             "ask": int(asks[0]["price"]) if asks else 0,
             "ask_qty": int(asks[0].get("quantity") or 0) if asks else 0,
             "avg": sil / vol if vol else 0.0,
+            "median": median,
             "volume": vol,
         }
 
@@ -125,20 +130,33 @@ class Trader:
 
     @staticmethod
     def plan(item: str, qty: int, b: dict) -> tuple:
-        """("instant", price, qty) | ("list", price, qty) | ("npc",) | ("keep",)"""
+        """("instant", price, qty) | ("list", price, qty) | ("npc",) | ("keep",)
+
+        Whichever pays more silver wins: the market (after its 2.5% + 8% fees)
+        or the NPC merchant. On the market we never go below 85% of what the
+        item really trades at (median), so one player dumping cheap can't drag
+        our price down with theirs."""
         npc = P.npc_price(item)
-        bid, ask, avg = b["bid"], b["ask"], b["avg"]
-        floor_price = math.ceil(avg * MIN_AVG_SHARE) if avg else 0
+        bid, ask = b["bid"], b["ask"]
+        ref = b.get("median") or b["avg"]             # what it really trades at
+        floor_price = math.ceil(ref * MIN_AVG_SHARE) if ref else 0
         if bid and bid >= floor_price and P.market_net(bid) > npc:
             return ("instant", bid, min(qty, b["bid_qty"]) or qty)
-        if not ask and not avg:
+        if not ask and not ref:
             return ("npc",) if npc else ("keep",)   # no market for it: don't guess a price
-        price = ask - 1 if ask else round(avg)
-        price = max(price, floor_price, bid + 1 if bid else 1)
-        if ask:
-            price = min(price, ask)     # never list above the cheapest seller: it would never fill
-        if P.market_net(price) <= npc * 1.15:
-            return ("npc",) if npc else ("keep",)
+        if ask and ask - 1 >= floor_price:
+            price = ask - 1             # undercut the cheapest seller by one
+        elif ask:
+            price = floor_price         # cheapest seller is dumping: don't follow them down
+        else:
+            price = round(ref)          # nobody selling: list at the usual trade price
+        if ref and ask and ask > ref * 1.5:
+            # the cheapest seller is asking far above what it trades at: undercutting
+            # them would still never fill, so list a little above the usual price
+            price = max(round(ref * 1.2), floor_price)
+        price = max(price, bid + 1 if bid else 1)
+        if P.market_net(price) <= npc:
+            return ("npc",) if npc else ("keep",)   # merchant pays more than players would
         return ("list", price, qty)
 
     def my_orders(self) -> list[dict]:
@@ -418,6 +436,16 @@ class Trader:
             price = max(p["low"] - 1, int(p["avg"] * 0.1), 1)
             # came back unsold before: 15% cheaper per earlier listing
             price = max(int(price * (1 - 0.15 * self.relists.get(gid, 0))), 1)
+            # ...but never so cheap that the merchant or salvage would pay more
+            alt = max(P.gear_npc_price(g), P.FRAGMENT_VALUE_PER_TIER * int(g.get("tier") or 1))
+            min_price = math.ceil(alt / (1 - P.MARKET_SALE_TAX - P.MARKET_LISTING_FEE)) + 1
+            if price < min_price:
+                if p["low"] < min_price:
+                    # players undercut what the merchant/salvage pays: don't list it
+                    if P.FRAGMENT_VALUE_PER_TIER * int(g.get("tier") or 1) >= P.gear_npc_price(g):
+                        salvage.append(g)
+                    continue
+                price = min_price
             silver0 = int(self.state.self_.get("silver") or 0)
             await self.client.send(P.market_list_gear(gid, price))
             await asyncio.sleep(1.2)

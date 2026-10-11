@@ -171,6 +171,9 @@ Semua opsional selain tiga yang diisi installer. Ubah, lalu restart bot.
 | `FARM_GOAL` | silver | Map dinilai dari `silver`/jam bersih, atau `exp`/jam |
 | `ENABLE_MARKET` | false | Jual-beli otomatis di market pemain |
 | `MARKET_SELL_CARDS` | true | Ikut jual card di market |
+| `OPEN_CARD_ALBUMS` | true | Buka Faded Card Album (kartu di dalamnya rata-rata ±14rb) daripada jual albumnya (±8rb) |
+
+**Aturan harga market (anti jual rugi):** patokan = median harga transaksi per jam (24 jam terakhir), bukan rata-rata, supaya satu transaksi ekstrem tidak mengacaukan. Jual langsung ke bid hanya kalau bid ≥ 85% median. Kalau pasang jual: 1 silver di bawah penjual termurah, tapi tidak pernah di bawah 85% median (penjual yang banting harga tidak diikuti), dan kalau penjual termurah minta > 1,5× median, dipasang ±1,2× median supaya tetap laku. Hasil bersih setelah fee (2,5% pasang + 8% pajak) selalu dibandingkan dengan harga NPC — mana yang memberi silver lebih banyak, itu yang dipakai. Gear tidak pernah dipasang lebih murah dari harga NPC/salvage-nya. Beli Gold ditahan kalau harga > 12% di atas median transaksi Gold.
 | `MARKET_SELL_GEAR` | true | Jual gear yang tidak akan dipakai (class lain / lebih jelek) |
 | `MARKET_GEAR_SLOTS` | 20 | Maks gear dipasang sekaligus (40 kalau premium) |
 | `MARKET_REPRICE_HOURS` | 6 | Pasang ulang order item (loot, card, potion) yang belum laku setelah sekian jam |

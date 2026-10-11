@@ -412,9 +412,17 @@ MARKET_SELL_KEEP = {
     "fly_wing": 10,
     "butterfly_wing": 15,       # Return Scrolls: we use a few
     "concentration_potion": 0,
-    "relic_box": 0,
-    "card_album": 0,            # players pay ~9,000-11,800 (NPC 500); was never sold
+    "relic_box": 0,             # ~1,045 on the market; contents are mostly potions
 }
+# Faded Card Album: opening gives one of the 52 monster cards at equal odds.
+# Survey 2026-10-11: average card nets ~14,300 on the market vs ~8,000 for
+# selling the album itself, so albums are opened and the card is sold.
+CARD_ALBUM = "card_album"
+
+
+def use_items(item: str, quantity: int) -> dict:
+    """Use/open several of an item at once (client's "open all")."""
+    return {"type": "use", "item": item, "quantity": int(quantity)}
 # Salvage fragments from dismantled gear (~40-90 silver each on the market).
 FRAGMENTS = [f"{k}_fragment_{t}" for k in ("weapon", "equipment") for t in range(1, 6)]
 MARKET_SELL_KEEP.update({f: 0 for f in FRAGMENTS})
@@ -484,6 +492,27 @@ def gear_npc_price(g: dict) -> int:
 MARKET_LISTING_FEE = 0.025
 MARKET_SALE_TAX = 0.08
 MARKET_BUY_FEE = 0.01
+
+
+# Monster cards: merchant buy-back price (client card table). These are the
+# 52 cards a Faded Card Album can roll, all at equal odds.
+CARD_NPC_PRICES = {
+    "hopper_card": 150, "hollow_card": 250, "mushroom_card": 200, "bat_card": 220,
+    "beetle_card": 220, "crab_card": 250, "sprout_card": 180, "bunny_card": 190,
+    "pixie_card": 210, "rootling_card": 220, "moth_card": 220, "hare_card": 230,
+    "puff_card": 300, "icicle_card": 320, "snowowl_card": 340, "fox_card": 360,
+    "gecko_card": 420, "scarab_card": 450, "cobra_card": 470, "cactus_card": 490,
+    "toad_card": 540, "newt_card": 560, "mire_card": 580, "mantis_card": 600,
+    "wisp_card": 660, "wolf_card": 680, "antler_card": 700, "moonowl_card": 720,
+    "lynx_card": 740, "boar_card": 800, "drake_card": 850, "golem_card": 900,
+    "salamander_card": 950, "hound_card": 980, "tortoise_card": 1000, "scorpion_card": 1050,
+    "raven_card": 1100, "bonehound_card": 1120, "wraith_card": 1150, "knight_card": 1180,
+    "quartz_card": 1250, "geode_card": 1280, "prism_card": 1320, "wyvern_card": 1360,
+    "ram_card": 1450, "roc_card": 1480, "cloud_card": 1520, "stormdrake_card": 1600,
+    "sentinel_card": 1650, "griffin_card": 1700, "seraph_card": 1750, "colossus_card": 1800,
+}
+NPC_PRICES.update(CARD_NPC_PRICES)
+NPC_PRICES["boss_card"] = 3000
 
 
 def npc_price(item: str) -> int:

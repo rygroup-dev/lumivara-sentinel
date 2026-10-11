@@ -74,6 +74,7 @@ class Config:
     # Player market (needs ENABLE_MARKET): sell loot/refine stones/cards to players
     market_sell_cards: bool = True
     market_sell_gear: bool = True     # list gear we won't wear (other class / worse)
+    open_card_albums: bool = True     # open albums (card inside ~14k avg) instead of selling (~8k)
     market_gear_slots: int = 20       # gear listings allowed at once (40 with premium)
     market_buy_gear: bool = True      # buy clear gear upgrades from players
     gear_daily_budget: int = 5000     # silver per day for gear upgrades
@@ -119,6 +120,7 @@ class Config:
             farm_goal=(os.getenv("FARM_GOAL", "silver").strip().lower() or "silver"),
             market_sell_cards=_b("MARKET_SELL_CARDS", True),
             market_sell_gear=_b("MARKET_SELL_GEAR", True),
+            open_card_albums=_b("OPEN_CARD_ALBUMS", True),
             market_gear_slots=_i("MARKET_GEAR_SLOTS", 20),
             market_buy_gear=_b("MARKET_BUY_GEAR", True),
             gear_daily_budget=_i("GEAR_DAILY_BUDGET", 5000),

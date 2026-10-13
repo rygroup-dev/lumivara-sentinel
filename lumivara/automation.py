@@ -816,10 +816,16 @@ class Automator:
 
         silver0 = int(self.state.self_.get("silver") or 0)
         loot = self._sellable()
+        # Since the 2026-10-12 game update the server answers some NPC sales with 0 silver
+        # (the items stay in the bag). After two empty sales, stop trying until the server day changes.
+        day = (self.state.self_.get("npcSales") or {}).get("day")
+        if getattr(self, "_npc_sell_off_day", None) is not None and day == self._npc_sell_off_day:
+            loot = []
         spare = self._spare_potions()
         if spare:
             loot.append((P.POTION_BUY_ENTRY, spare))
         if loot:
+            ev0 = len(self.state.events)
             for i in range(0, len(loot), 20):
                 await self.client.send(P.sell_batch(
                     [{"item": k, "quantity": q} for k, q in loot[i:i + 20]]))
@@ -828,6 +834,15 @@ class Automator:
             self.counts["sold_silver"] += max(gained, 0)
             log.info("sold %d loot stacks for %d silver (silver now %s)",
                      len(loot), gained, self.state.self_.get("silver"))
+            if gained <= 0:   # the server said why (or nothing at all): keep it for the log
+                log.warning("NPC sell got nothing: %s | reply %s", loot[:6],
+                            list(self.state.events)[ev0:][-6:])
+                self._npc_sell_zero = getattr(self, "_npc_sell_zero", 0) + 1
+                if self._npc_sell_zero >= 2:
+                    self._npc_sell_off_day = day
+                    log.warning("NPC sales pay 0 silver today: skipping them until tomorrow (server day %s)", day)
+            else:
+                self._npc_sell_zero = 0
 
         async def buy(entry: str, qty: int, unit: float) -> None:
             silver = int(self.state.self_.get("silver") or 0)
